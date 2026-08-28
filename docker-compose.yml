@@ -1,11 +1,21 @@
-# Sobe os 5 invariant_* juntos, localmente -- assume os outros 4 repos
-# clonados como irmãos deste (../invariant_contracts, ../invariant_assessment,
-# ../invariant_ingestion, ../invariant_frontend). Sem `depends_on` entre
-# nenhum serviço (mesmo padrão do monólito -- nenhum conecta eagerly no
-# boot, db.connect()/os clients HTTP só são chamados por request).
+# Sobe os 5 invariant_* juntos -- usado tanto em dev local quanto como
+# stack de validação na própria VPS de produção (cada repo's deploy.yml
+# roda `docker compose up -d --build --wait <service>` aqui). Sem
+# `depends_on` entre nenhum serviço (mesmo padrão do monólito -- nenhum
+# conecta eagerly no boot, db.connect()/os clients HTTP só são chamados
+# por request).
+#
+# `expose` em vez de `ports` em todo lugar de propósito: a VPS já tem
+# outros processos publicados em 5432/8000/8001 (confirmado empiricamente
+# antes desta stack existir) -- sem porta de host, zero risco de colisão,
+# mesmo padrão que docker-compose.prod.yml do monólito já usa (nginx-proxy
+# + rede Docker interna, nunca porta publicada direto). Essa stack ainda
+# NÃO está ligada ao roteamento público (nginx-proxy) -- é só validação
+# em paralelo (Strangler Fig), acessível via `docker exec`/rede interna
+# até o corte de tráfego real ser decidido.
 #
 # Rodar da raiz deste repo: docker compose up -d --build --wait
-name: invariant-local
+name: invariant-next
 
 services:
   postgres:
@@ -15,7 +25,7 @@ services:
       POSTGRES_PASSWORD: invariant
       POSTGRES_DB: invariant
     volumes: ["pgdata:/var/lib/postgresql/data"]
-    ports: ["5432:5432"]
+    expose: ["5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U invariant"]
       interval: 10s
@@ -30,7 +40,7 @@ services:
     # jeito que o monólito's subprocess.run(["docker", "exec", ...]) já
     # fazia.
     volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
-    ports: ["8001:8000"]
+    expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       interval: 30s
@@ -41,7 +51,7 @@ services:
     build:
       context: ../invariant_ingestion
     volumes: ["../data/raw:/app/data/raw"]
-    ports: ["8002:8000"]
+    expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       interval: 30s
@@ -57,7 +67,7 @@ services:
       INVARIANT_INGESTION_URL: http://ingestion:8000
       INVARIANT_API_CORS_ORIGINS: http://localhost:5173
     volumes: ["../data/demo:/app/data/demo:ro"]
-    ports: ["8000:8000"]
+    expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       interval: 30s
@@ -68,8 +78,8 @@ services:
     build:
       context: ../invariant_frontend
       args:
-        VITE_API_BASE: "http://localhost:8000"
-    ports: ["5173:80"]
+        VITE_API_BASE: ""
+    expose: ["80"]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80"]
       interval: 30s
