@@ -1,0 +1,49 @@
+# Só Postgres (a única coisa este serviço de fato acessa) -- sem
+# Playwright, sem os 6 containers de teste (esses são responsabilidade do
+# invariant_assessment agora, e os clients de assessment/ingestion nem
+# precisam estar rodando pros testes de tests/api/ -- são portados 1:1 do
+# monólito e não tocam nas rotas novas assess.py/ingest.py). Testes das
+# rotas novas ficam marcados integration por enquanto (precisam dos outros
+# 2 serviços rodando) -- não bloqueiam o CI, mesma disciplina já usada em
+# invariant_ingestion.
+name: ci
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: invariant
+          POSTGRES_PASSWORD: invariant_dev
+          POSTGRES_DB: invariant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://invariant:invariant_dev@localhost:5432/invariant
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: alembic upgrade head
+      # test_postgres.py is marked `integration` (same generic "needs a
+      # real external service" marker convention as the other invariant_*
+      # repos) but Postgres IS available here -- no filter needed. Only
+      # future tests against the other 2 services (not up in this CI)
+      # would need `-m "not integration"`.
+      - run: pytest tests/ -q

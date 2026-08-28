@@ -1,0 +1,80 @@
+# Sobe os 5 invariant_* juntos, localmente -- assume os outros 4 repos
+# clonados como irmãos deste (../invariant_contracts, ../invariant_assessment,
+# ../invariant_ingestion, ../invariant_frontend). Sem `depends_on` entre
+# nenhum serviço (mesmo padrão do monólito -- nenhum conecta eagerly no
+# boot, db.connect()/os clients HTTP só são chamados por request).
+#
+# Rodar da raiz deste repo: docker compose up -d --build --wait
+name: invariant-local
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: invariant
+      POSTGRES_PASSWORD: invariant
+      POSTGRES_DB: invariant
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invariant"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  assessment:
+    build:
+      context: ../invariant_assessment
+    # collect_facts() faz `docker exec <alvo> ...` -- este container
+    # precisa do socket do host pra alcançar os containers-alvo, do mesmo
+    # jeito que o monólito's subprocess.run(["docker", "exec", ...]) já
+    # fazia.
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+    ports: ["8001:8000"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  ingestion:
+    build:
+      context: ../invariant_ingestion
+    volumes: ["../data/raw:/app/data/raw"]
+    ports: ["8002:8000"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  api:
+    build:
+      context: .
+    environment:
+      DATABASE_URL: postgresql://invariant:invariant@postgres:5432/invariant
+      INVARIANT_ASSESSMENT_URL: http://assessment:8000
+      INVARIANT_INGESTION_URL: http://ingestion:8000
+      INVARIANT_API_CORS_ORIGINS: http://localhost:5173
+    volumes: ["../data/demo:/app/data/demo:ro"]
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: ../invariant_frontend
+      args:
+        VITE_API_BASE: "http://localhost:8000"
+    ports: ["5173:80"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata:
