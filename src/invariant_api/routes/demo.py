@@ -6,17 +6,19 @@ FastAPI app instead of being the whole app.
 """
 
 import json
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
 
-# .../invariant_api/src/invariant_api/routes/demo.py -> repo root is
-# parents[3] here (was parents[4] in the monolith's src/invariant/api/
-# main.py -- one less package-nesting level, routes/ is the only new
-# subdirectory added, matching api/'s own single level in the monolith).
-DEMO_DATA_DIR = Path(__file__).resolve().parents[3] / "data" / "demo"
+# parents[3] only resolves to the repo root for an editable install (pip
+# install -e ., used in dev/CI) -- `pip install .` (the Dockerfile) copies
+# demo.py into site-packages, breaking that assumption (same issue as
+# storage/postgres.py's _SQL_DIR). INVARIANT_API_DATA_DEMO_DIR overrides it
+# for that case (set to /app/data/demo in the Dockerfile).
+DEMO_DATA_DIR = Path(os.environ.get("INVARIANT_API_DATA_DEMO_DIR") or Path(__file__).resolve().parents[3] / "data" / "demo")
 STATUS_PATH = DEMO_DATA_DIR / "status.json"
 RUNS_PATH = DEMO_DATA_DIR / "runs.jsonl"
 

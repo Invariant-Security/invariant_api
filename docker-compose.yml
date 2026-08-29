@@ -9,10 +9,15 @@
 # outros processos publicados em 5432/8000/8001 (confirmado empiricamente
 # antes desta stack existir) -- sem porta de host, zero risco de colisão,
 # mesmo padrão que docker-compose.prod.yml do monólito já usa (nginx-proxy
-# + rede Docker interna, nunca porta publicada direto). Essa stack ainda
-# NÃO está ligada ao roteamento público (nginx-proxy) -- é só validação
-# em paralelo (Strangler Fig), acessível via `docker exec`/rede interna
-# até o corte de tráfego real ser decidido.
+# + rede Docker interna, nunca porta publicada direto).
+#
+# `web`/`api` entram também na rede `vps-proxy` (externa) com
+# `container_name` fixo (`invariant-next-web`/`invariant-next-api`, mesma
+# convenção de todo container nessa rede compartilhada -- nomes de serviço
+# genéricos tipo "api"/"web" colidiriam com outros projetos) para o
+# nginx-proxy alcançá-los em `next.invariantsec.org`. `postgres`/
+# `assessment`/`ingestion` ficam só na rede interna -- Strangler Fig,
+# validação em paralelo ao monólito, ainda não é o tráfego real.
 #
 # Rodar da raiz deste repo: docker compose up -d --build --wait
 name: invariant-next
@@ -61,12 +66,14 @@ services:
   api:
     build:
       context: .
+    container_name: invariant-next-api
     environment:
       DATABASE_URL: postgresql://invariant:invariant@postgres:5432/invariant
       INVARIANT_ASSESSMENT_URL: http://assessment:8000
       INVARIANT_INGESTION_URL: http://ingestion:8000
-      INVARIANT_API_CORS_ORIGINS: http://localhost:5173
+      INVARIANT_API_CORS_ORIGINS: https://next.invariantsec.org
     volumes: ["../data/demo:/app/data/demo:ro"]
+    networks: ["default", "vps-proxy"]
     expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
@@ -79,6 +86,8 @@ services:
       context: ../invariant_frontend
       args:
         VITE_API_BASE: ""
+    container_name: invariant-next-web
+    networks: ["default", "vps-proxy"]
     expose: ["80"]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80"]
@@ -88,3 +97,8 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  default: {}
+  vps-proxy:
+    external: true
