@@ -14,5 +14,7 @@ COPY sql/ ./sql/
 COPY alembic.ini ./
 RUN pip install --no-cache-dir .
 
+ENV INVARIANT_API_SQL_DIR=/app/sql
+
 EXPOSE 8000
 CMD ["uvicorn", "invariant_api.main:app", "--host", "0.0.0.0", "--port", "8000"]

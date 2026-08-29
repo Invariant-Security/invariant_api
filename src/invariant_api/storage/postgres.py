@@ -10,11 +10,12 @@ from psycopg.types.json import Jsonb
 
 from invariant_api.config import load_dotenv
 
-# .../invariant_api/src/invariant_api/storage/postgres.py -> repo root is
-# parents[3] here (was parents[4] in the monolith -- storage/postgres/
-# __init__.py's own subpackage nesting doesn't exist in this repo's flat
-# storage/postgres.py layout).
-_QUERIES_DIR = Path(__file__).resolve().parents[3] / "sql" / "queries"
+# parents[3] only resolves to the repo root for an editable install (pip
+# install -e ., used in dev/CI) -- `pip install .` (the Dockerfile) copies
+# postgres.py into site-packages, breaking that assumption. INVARIANT_API_SQL_DIR
+# overrides it for that case (set to /app/sql in the Dockerfile).
+_SQL_DIR = Path(os.environ.get("INVARIANT_API_SQL_DIR") or Path(__file__).resolve().parents[3] / "sql")
+_QUERIES_DIR = _SQL_DIR / "queries"
 
 _UPSERT_SOURCE = (_QUERIES_DIR / "upsert_source.sql").read_text()
 _UPSERT_DOCUMENT = (_QUERIES_DIR / "upsert_document.sql").read_text()
