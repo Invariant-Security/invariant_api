@@ -15,9 +15,9 @@
 # `container_name` fixo (`invariant-next-web`/`invariant-next-api`, mesma
 # convenção de todo container nessa rede compartilhada -- nomes de serviço
 # genéricos tipo "api"/"web" colidiriam com outros projetos) para o
-# nginx-proxy alcançá-los em `next.invariantsec.org`. `postgres`/
-# `assessment`/`ingestion` ficam só na rede interna -- Strangler Fig,
-# validação em paralelo ao monólito, ainda não é o tráfego real.
+# nginx-proxy alcançá-los. Desde 29/08/2026 é o tráfego real de
+# `invariantsec.org` (corte feito, monólito antigo desligado) -- `postgres`/
+# `assessment`/`ingestion` seguem só na rede interna.
 #
 # Rodar da raiz deste repo: docker compose up -d --build --wait
 name: invariant-next
@@ -55,7 +55,7 @@ services:
   ingestion:
     build:
       context: ../invariant_ingestion
-    volumes: ["../data/raw:/app/data/raw"]
+    volumes: ["../../data/raw:/app/data/raw"]
     expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
@@ -71,8 +71,8 @@ services:
       DATABASE_URL: postgresql://invariant:invariant@postgres:5432/invariant
       INVARIANT_ASSESSMENT_URL: http://assessment:8000
       INVARIANT_INGESTION_URL: http://ingestion:8000
-      INVARIANT_API_CORS_ORIGINS: https://next.invariantsec.org
-    volumes: ["../data/demo:/app/data/demo:ro"]
+      INVARIANT_API_CORS_ORIGINS: https://invariantsec.org
+    volumes: ["../../data/demo:/app/data/demo:ro"]
     networks: ["default", "vps-proxy"]
     expose: ["8000"]
     healthcheck:
