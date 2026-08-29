@@ -16,7 +16,7 @@ jobs:
     name: deploy-dev
     runs-on: [self-hosted, vps-prod]
     env:
-      STACK_DIR: /srv/projects/publicado/invariant_api-dev
+      STACK_DIR: /srv/projects/publicado/invariant/dev/invariant_api
     steps:
       - name: Atualizar código
         run: |
