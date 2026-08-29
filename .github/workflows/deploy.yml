@@ -1,0 +1,43 @@
+# Ver invariant_assessment/.github/workflows/deploy.yml -- mesmo padrão,
+# mas este repo É o dono do docker-compose.yml da stack (STACK_DIR ==
+# SRC_DIR), então atualiza o compose junto com o código antes de subir
+# `postgres` (garante schema/volume) e `api`.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-invariant-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: [self-hosted, vps-prod]
+    env:
+      STACK_DIR: /srv/projects/publicado/invariant_api
+    steps:
+      - name: Atualizar código
+        run: |
+          git config --global --add safe.directory "$STACK_DIR"
+          cd "$STACK_DIR"
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Subir postgres e reconstruir a api
+        run: |
+          cd "$STACK_DIR"
+          docker compose up -d --build --wait --wait-timeout 180 postgres api
+
+      - name: Rodar migrações
+        run: |
+          cd "$STACK_DIR"
+          docker compose run --rm api alembic upgrade head
+
+      - name: Logs em caso de falha
+        if: failure()
+        run: |
+          cd "$STACK_DIR"
+          docker compose logs --tail=80 postgres api || true
