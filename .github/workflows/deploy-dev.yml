@@ -1,0 +1,42 @@
+# Espelha deploy.yml, mas pra branch `dev` -- este repo é o dono do
+# docker-compose.dev.yml da stack invariant-next-dev, então atualiza o
+# compose junto com o código antes de subir `postgres`/`api` e migrar.
+name: deploy-dev
+
+on:
+  push:
+    branches: [dev]
+
+concurrency:
+  group: deploy-dev-invariant-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy-dev
+    runs-on: [self-hosted, vps-prod]
+    env:
+      STACK_DIR: /srv/projects/publicado/invariant_api-dev
+    steps:
+      - name: Atualizar código
+        run: |
+          git config --global --add safe.directory "$STACK_DIR"
+          cd "$STACK_DIR"
+          git fetch origin dev
+          git reset --hard origin/dev
+
+      - name: Subir postgres e reconstruir a api
+        run: |
+          cd "$STACK_DIR"
+          docker compose -f docker-compose.dev.yml up -d --build --wait --wait-timeout 180 postgres api
+
+      - name: Rodar migrações
+        run: |
+          cd "$STACK_DIR"
+          docker compose -f docker-compose.dev.yml run --rm api alembic upgrade head
+
+      - name: Logs em caso de falha
+        if: failure()
+        run: |
+          cd "$STACK_DIR"
+          docker compose -f docker-compose.dev.yml logs --tail=80 postgres api || true

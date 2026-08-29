@@ -1,0 +1,89 @@
+# Mesma stack de docker-compose.yml, mas construída a partir das branches
+# `dev` (checkouts irmãos `../invariant_*-dev`) em vez de `main` -- espelha
+# o par prod/dev que o monólito já usa (invariant/ vs invariant-dev/,
+# invariantsec.org vs teste.invariantsec.org). Cada repo tem seu próprio
+# deploy-dev.yml disparando nesta stack quando algo é empurrado pra `dev`.
+#
+# `data/demo` e `data/raw` apontam pro MESMO caminho compartilhado que
+# docker-compose.yml (prod) usa -- mesma convenção do monólito ("Le o mesmo
+# data/demo/ da producao (nao roda pipeline proprio)", ver invariant/
+# deploy/docker-compose.dev.yml): dev não tem seu próprio conjunto de
+# dados, só um build diferente do código.
+name: invariant-next-dev
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: invariant
+      POSTGRES_PASSWORD: invariant
+      POSTGRES_DB: invariant
+    volumes: ["pgdata_dev:/var/lib/postgresql/data"]
+    expose: ["5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invariant"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  assessment:
+    build:
+      context: ../invariant_assessment-dev
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  ingestion:
+    build:
+      context: ../invariant_ingestion-dev
+    volumes: ["../data/raw:/app/data/raw"]
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  api:
+    build:
+      context: .
+    container_name: invariant-next-dev-api
+    environment:
+      DATABASE_URL: postgresql://invariant:invariant@postgres:5432/invariant
+      INVARIANT_ASSESSMENT_URL: http://assessment:8000
+      INVARIANT_INGESTION_URL: http://ingestion:8000
+      INVARIANT_API_CORS_ORIGINS: https://teste.invariantsec.org
+    volumes: ["../data/demo:/app/data/demo:ro"]
+    networks: ["default", "vps-proxy"]
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: ../invariant_frontend-dev
+      args:
+        VITE_API_BASE: ""
+    container_name: invariant-next-dev-web
+    networks: ["default", "vps-proxy"]
+    expose: ["80"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata_dev:
+
+networks:
+  default: {}
+  vps-proxy:
+    external: true
