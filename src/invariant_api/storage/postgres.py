@@ -26,6 +26,10 @@ _SELECT_LATEST_DOCUMENT_VERSION_ID = (_QUERIES_DIR / "select_latest_document_ver
 _SELECT_EXTRACTED_ITEMS = (_QUERIES_DIR / "select_extracted_items.sql").read_text()
 _SELECT_CONTROL_BY_EXTERNAL_ID = (_QUERIES_DIR / "select_control_by_external_id.sql").read_text()
 _SELECT_CONTROL_BY_TITLE = (_QUERIES_DIR / "select_control_by_title.sql").read_text()
+_INSERT_CONTRACT = (_QUERIES_DIR / "insert_contract.sql").read_text()
+_UPDATE_CONTRACT_MP_PAYMENT_ID = (_QUERIES_DIR / "update_contract_mp_payment_id.sql").read_text()
+_UPDATE_CONTRACT_PAID = (_QUERIES_DIR / "update_contract_paid.sql").read_text()
+_SELECT_CONTRACT_BY_ID = (_QUERIES_DIR / "select_contract_by_id.sql").read_text()
 
 
 def connect() -> psycopg.Connection:
@@ -193,4 +197,72 @@ def select_control_by_title(conn: psycopg.Connection, *, document: str, titles: 
             "raw_artifact_path": raw_artifact_path,
             "content_hash": content_hash,
             "retrieved_at": retrieved_at,
+        }
+
+
+def insert_contract(
+    conn: psycopg.Connection,
+    *,
+    plan: str,
+    activations: int,
+    amount_cents: int,
+    contact_name: str,
+    contact_email: str,
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            _INSERT_CONTRACT,
+            {
+                "plan": plan,
+                "activations": activations,
+                "amount_cents": amount_cents,
+                "contact_name": contact_name,
+                "contact_email": contact_email,
+            },
+        )
+        return cur.fetchone()[0]
+
+
+def update_contract_mp_payment_id(conn: psycopg.Connection, *, id: int, mp_payment_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_UPDATE_CONTRACT_MP_PAYMENT_ID, {"id": id, "mp_payment_id": mp_payment_id})
+
+
+def update_contract_paid(conn: psycopg.Connection, *, id: int) -> bool:
+    """Returns False if the contract was already paid (or doesn't exist) --
+    the webhook can be delivered more than once for the same payment, so
+    the caller uses this to stay idempotent.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_UPDATE_CONTRACT_PAID, {"id": id})
+        return cur.rowcount > 0
+
+
+def select_contract_by_id(conn: psycopg.Connection, *, id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_CONTRACT_BY_ID, {"id": id})
+        row = cur.fetchone()
+        if row is None:
+            return None
+        (
+            contract_id,
+            plan,
+            activations,
+            amount_cents,
+            status,
+            contact_name,
+            contact_email,
+            created_at,
+            paid_at,
+        ) = row
+        return {
+            "id": contract_id,
+            "plan": plan,
+            "activations": activations,
+            "amount_cents": amount_cents,
+            "status": status,
+            "contact_name": contact_name,
+            "contact_email": contact_email,
+            "created_at": created_at,
+            "paid_at": paid_at,
         }

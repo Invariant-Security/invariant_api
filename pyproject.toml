@@ -10,6 +10,7 @@ dependencies = [
     "httpx",
     "psycopg[binary]",
     "alembic",
+    "mercadopago",
 ]
 
 [project.optional-dependencies]
