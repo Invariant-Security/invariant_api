@@ -36,6 +36,39 @@ def _read_runs() -> list[dict]:
     return runs
 
 
+# ponytail: 2MB is ~6x today's average run line (~313KB, 73 runs / 22MB
+# total) -- comfortable headroom without reading the whole file. If a
+# single run ever legitimately exceeds this, the fallback below still
+# returns the right answer, just slower; raise this constant first if that
+# starts happening often.
+_TAIL_READ_BYTES = 2 * 1024 * 1024
+
+
+def _read_last_run() -> dict | None:
+    """Like _read_runs()[-1], but reads only the tail of the file instead
+    of parsing every line -- this is what made the demo page's first paint
+    depend on downloading+parsing the entire (currently 22MB) runs.jsonl
+    just to show the latest result.
+    """
+    if not RUNS_PATH.exists():
+        return None
+    file_size = RUNS_PATH.stat().st_size
+    if file_size == 0:
+        return None
+    with open(RUNS_PATH, "rb") as f:
+        f.seek(max(0, file_size - _TAIL_READ_BYTES))
+        tail = f.read()
+    lines = [line for line in tail.split(b"\n") if line.strip()]
+    if not lines:
+        if file_size > _TAIL_READ_BYTES:
+            # Last line is bigger than our tail window -- fall back to a
+            # full read rather than guess.
+            runs = _read_runs()
+            return runs[-1] if runs else None
+        return None
+    return json.loads(lines[-1])
+
+
 @router.get("/api/demo/status")
 def get_status():
     if not STATUS_PATH.exists():
@@ -53,10 +86,10 @@ def get_runs():
 
 @router.get("/api/demo/runs/latest")
 def get_latest_run():
-    runs = _read_runs()
-    if not runs:
+    run = _read_last_run()
+    if run is None:
         raise HTTPException(
             status_code=404,
             detail="No completed demo run yet -- run ./demo.sh first.",
         )
-    return runs[-1]["report"]
+    return run

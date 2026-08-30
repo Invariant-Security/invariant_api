@@ -87,7 +87,11 @@ def test_get_latest_run_404_when_no_runs(tmp_path, monkeypatch):
     assert "demo.sh" in response.json()["detail"]
 
 
-def test_get_latest_run_returns_report_of_last_line(tmp_path, monkeypatch):
+def test_get_latest_run_returns_last_line_whole(tmp_path, monkeypatch):
+    """Returns the whole run object (run_id/started_at/report/...), not
+    just .report -- changed alongside the _read_last_run() tail-read
+    optimization since nothing consumed the old .report-only shape yet.
+    """
     runs_path = tmp_path / "runs.jsonl"
     run_a = {"run_id": "a", "report": {"containers": {"container-a": {"fail_count": 1}}}}
     run_b = {"run_id": "b", "report": {"containers": {"container-b": {"fail_count": 2}}}}
@@ -97,7 +101,52 @@ def test_get_latest_run_returns_report_of_last_line(tmp_path, monkeypatch):
     response = client.get("/api/demo/runs/latest")
 
     assert response.status_code == 200
-    assert response.json() == run_b["report"]
+    assert response.json() == run_b
+
+
+def test_get_latest_run_skips_trailing_blank_line(tmp_path, monkeypatch):
+    runs_path = tmp_path / "runs.jsonl"
+    run_a = {"run_id": "a", "report": {}}
+    runs_path.write_text(json.dumps(run_a) + "\n\n")
+    monkeypatch.setattr(demo, "RUNS_PATH", runs_path)
+
+    response = client.get("/api/demo/runs/latest")
+
+    assert response.status_code == 200
+    assert response.json() == run_a
+
+
+def test_read_last_run_matches_full_read_without_parsing_earlier_lines(tmp_path, monkeypatch):
+    """The actual perf fix: on a file much bigger than _TAIL_READ_BYTES,
+    _read_last_run() must still return the true last line -- and must do
+    it via the tail read, not by silently falling back to a full parse
+    (which would defeat the whole point).
+    """
+    runs_path = tmp_path / "runs.jsonl"
+    # Every line padded well past the tail window so a correct
+    # implementation is forced to actually seek, not just happen to read
+    # everything anyway.
+    padding = "x" * 5000
+    lines = [json.dumps({"run_id": f"run-{i}", "padding": padding, "report": {}}) for i in range(500)]
+    runs_path.write_text("\n".join(lines) + "\n")
+
+    monkeypatch.setattr(demo, "RUNS_PATH", runs_path)
+    monkeypatch.setattr(demo, "_TAIL_READ_BYTES", 8192)  # force a real seek, not "tail happens to be everything"
+    assert runs_path.stat().st_size > 8192 * 2
+
+    read_runs_called = []
+    original_read_runs = demo._read_runs
+
+    def spy_read_runs():
+        read_runs_called.append(True)
+        return original_read_runs()
+
+    monkeypatch.setattr(demo, "_read_runs", spy_read_runs)
+
+    result = demo._read_last_run()
+
+    assert result["run_id"] == "run-499"
+    assert not read_runs_called, "should answer from the tail read, not fall back to a full parse"
 
 
 def test_cors_allows_vite_dev_server_origin():
