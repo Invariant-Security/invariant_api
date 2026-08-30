@@ -59,14 +59,23 @@ def _read_last_run() -> dict | None:
         f.seek(max(0, file_size - _TAIL_READ_BYTES))
         tail = f.read()
     lines = [line for line in tail.split(b"\n") if line.strip()]
-    if not lines:
-        if file_size > _TAIL_READ_BYTES:
-            # Last line is bigger than our tail window -- fall back to a
-            # full read rather than guess.
-            runs = _read_runs()
-            return runs[-1] if runs else None
-        return None
-    return json.loads(lines[-1])
+    if lines:
+        try:
+            return json.loads(lines[-1])
+        except json.JSONDecodeError:
+            # The window landed mid-line (the real last line is bigger
+            # than _TAIL_READ_BYTES, e.g. a run with 80+ findings whose
+            # remediation text alone pushes it past 2MB -- confirmed on
+            # the "pivot" host target, 2026-08-30) -- what we grabbed is a
+            # truncated fragment, not a full line, even though it's
+            # non-blank. Falls through to the full read below.
+            pass
+    if file_size > _TAIL_READ_BYTES:
+        # Last line is bigger than our tail window -- fall back to a full
+        # read rather than guess.
+        runs = _read_runs()
+        return runs[-1] if runs else None
+    return None
 
 
 @router.get("/api/demo/status")
