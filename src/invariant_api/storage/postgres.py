@@ -30,6 +30,7 @@ _INSERT_CONTRACT = (_QUERIES_DIR / "insert_contract.sql").read_text()
 _UPDATE_CONTRACT_MP_PAYMENT_ID = (_QUERIES_DIR / "update_contract_mp_payment_id.sql").read_text()
 _UPDATE_CONTRACT_PAID = (_QUERIES_DIR / "update_contract_paid.sql").read_text()
 _SELECT_CONTRACT_BY_ID = (_QUERIES_DIR / "select_contract_by_id.sql").read_text()
+_INSERT_NEWSLETTER_SUBSCRIBER = (_QUERIES_DIR / "insert_newsletter_subscriber.sql").read_text()
 
 
 def connect() -> psycopg.Connection:
@@ -236,6 +237,17 @@ def update_contract_paid(conn: psycopg.Connection, *, id: int) -> bool:
     with conn.cursor() as cur:
         cur.execute(_UPDATE_CONTRACT_PAID, {"id": id})
         return cur.rowcount > 0
+
+
+def insert_newsletter_subscriber(conn: psycopg.Connection, *, email: str) -> int | None:
+    """Returns None when the row already existed (ON CONFLICT DO NOTHING
+    finds nothing to RETURNING) -- that's fine, re-subscribing succeeds
+    silently rather than leaking "this email is already subscribed".
+    """
+    with conn.cursor() as cur:
+        cur.execute(_INSERT_NEWSLETTER_SUBSCRIBER, {"email": email})
+        row = cur.fetchone()
+        return row[0] if row else None
 
 
 def select_contract_by_id(conn: psycopg.Connection, *, id: int) -> dict | None:
