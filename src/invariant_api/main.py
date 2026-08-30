@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from invariant_api.config import load_dotenv
-from invariant_api.routes import assess, demo, ingest
+from invariant_api.routes import assess, billing, demo, ingest, newsletter
 
 load_dotenv()
 
@@ -40,3 +40,5 @@ def healthz():
 app.include_router(demo.router)
 app.include_router(assess.router)
 app.include_router(ingest.router)
+app.include_router(billing.router)
+app.include_router(newsletter.router)
