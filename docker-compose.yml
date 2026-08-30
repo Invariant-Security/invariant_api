@@ -72,6 +72,11 @@ services:
       INVARIANT_ASSESSMENT_URL: http://assessment:8000
       INVARIANT_INGESTION_URL: http://ingestion:8000
       INVARIANT_API_CORS_ORIGINS: https://invariantsec.org
+      # Pix checkout (routes/billing.py) -- vazio até existir um .env com as
+      # credenciais reais nesta pasta; /billing/checkout responde 503 até lá.
+      MERCADO_PAGO_ACCESS_TOKEN: ${MERCADO_PAGO_ACCESS_TOKEN:-}
+      MERCADO_PAGO_WEBHOOK_SECRET: ${MERCADO_PAGO_WEBHOOK_SECRET:-}
+      INVARIANT_API_BASE_URL: https://invariantsec.org
     volumes: ["../../data/demo:/app/data/demo:ro"]
     networks: ["default", "vps-proxy"]
     expose: ["8000"]
