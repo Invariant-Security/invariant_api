@@ -48,6 +48,16 @@ services:
       timeout: 5s
       retries: 3
 
+  discovery:
+    build:
+      context: ../invariant_discovery
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   api:
     build:
       context: .
@@ -56,6 +66,8 @@ services:
       DATABASE_URL: postgresql://invariant:invariant@postgres:5432/invariant
       INVARIANT_ASSESSMENT_URL: http://assessment:8000
       INVARIANT_INGESTION_URL: http://ingestion:8000
+      INVARIANT_DISCOVERY_URL: http://discovery:8000
+      INVARIANT_API_SECRET_KEY: ${INVARIANT_API_SECRET_KEY:-}
       INVARIANT_API_CORS_ORIGINS: https://teste.invariantsec.org
       # Pix checkout (routes/billing.py) -- vazio até existir um .env com as
       # credenciais reais nesta pasta; /billing/checkout responde 503 até lá.

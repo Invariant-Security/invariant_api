@@ -63,6 +63,18 @@ services:
       timeout: 5s
       retries: 3
 
+  discovery:
+    build:
+      context: ../invariant_discovery
+    # Sondagem pura de rede (asyncio/socket/TLS) -- sem docker.sock, sem
+    # nenhum mount, diferente de assessment (docker exec no host).
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   api:
     build:
       context: .
@@ -71,6 +83,12 @@ services:
       DATABASE_URL: postgresql://invariant:invariant@postgres:5432/invariant
       INVARIANT_ASSESSMENT_URL: http://assessment:8000
       INVARIANT_INGESTION_URL: http://ingestion:8000
+      INVARIANT_DISCOVERY_URL: http://discovery:8000
+      # Assina o cookie de sessão do admin (auth.py) -- sem valor real
+      # aqui ainda, essa stack "next" na VPS não é o modo appliance (ver
+      # docker-compose.appliance.yml), então usa o fallback dev-only de
+      # auth.py até essa env var ser definida de verdade.
+      INVARIANT_API_SECRET_KEY: ${INVARIANT_API_SECRET_KEY:-}
       INVARIANT_API_CORS_ORIGINS: https://next.invariantsec.org
     volumes: ["../data/demo:/app/data/demo:ro"]
     networks: ["default", "vps-proxy"]

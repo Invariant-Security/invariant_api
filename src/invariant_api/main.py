@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from invariant_api.config import load_dotenv
-from invariant_api.routes import assess, billing, demo, ingest, newsletter
+from invariant_api.routes import assess, auth, billing, demo, endpoints, ingest, newsletter
 
 load_dotenv()
 
@@ -27,8 +27,15 @@ allow_origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
+    # Endpoints/auth (routes/auth.py, routes/endpoints.py) rely on a
+    # session cookie -- sem allow_credentials o navegador não manda nem
+    # aceita Set-Cookie em request cross-origin (frontend em :5173, api em
+    # :8000 no dev). allow_origins não pode ser "*" quando isso é True
+    # (regra do próprio CORS), mas já não é -- vem de
+    # INVARIANT_API_CORS_ORIGINS, sempre uma lista explícita.
+    allow_credentials=True,
 )
 
 
@@ -42,3 +49,5 @@ app.include_router(assess.router)
 app.include_router(ingest.router)
 app.include_router(billing.router)
 app.include_router(newsletter.router)
+app.include_router(auth.router)
+app.include_router(endpoints.router)

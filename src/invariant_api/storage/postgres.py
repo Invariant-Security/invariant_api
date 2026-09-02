@@ -31,6 +31,17 @@ _UPDATE_CONTRACT_MP_PAYMENT_ID = (_QUERIES_DIR / "update_contract_mp_payment_id.
 _UPDATE_CONTRACT_PAID = (_QUERIES_DIR / "update_contract_paid.sql").read_text()
 _SELECT_CONTRACT_BY_ID = (_QUERIES_DIR / "select_contract_by_id.sql").read_text()
 _INSERT_NEWSLETTER_SUBSCRIBER = (_QUERIES_DIR / "insert_newsletter_subscriber.sql").read_text()
+_INSERT_ADMIN_USER = (_QUERIES_DIR / "insert_admin_user.sql").read_text()
+_SELECT_ADMIN_USER_BY_USERNAME = (_QUERIES_DIR / "select_admin_user_by_username.sql").read_text()
+_COUNT_ADMIN_USERS = (_QUERIES_DIR / "count_admin_users.sql").read_text()
+_INSERT_ENDPOINT = (_QUERIES_DIR / "insert_endpoint.sql").read_text()
+_SELECT_ENDPOINTS = (_QUERIES_DIR / "select_endpoints.sql").read_text()
+_SELECT_ENDPOINT_BY_ID = (_QUERIES_DIR / "select_endpoint_by_id.sql").read_text()
+_DELETE_ENDPOINT = (_QUERIES_DIR / "delete_endpoint.sql").read_text()
+_INSERT_DISCOVERY_RESULT = (_QUERIES_DIR / "insert_discovery_result.sql").read_text()
+_SELECT_LATEST_DISCOVERY_RESULTS_BY_ENDPOINT = (
+    _QUERIES_DIR / "select_latest_discovery_results_by_endpoint.sql"
+).read_text()
 
 
 def connect() -> psycopg.Connection:
@@ -248,6 +259,114 @@ def insert_newsletter_subscriber(conn: psycopg.Connection, *, email: str) -> int
         cur.execute(_INSERT_NEWSLETTER_SUBSCRIBER, {"email": email})
         row = cur.fetchone()
         return row[0] if row else None
+
+
+def insert_admin_user(conn: psycopg.Connection, *, username: str, password_hash: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute(_INSERT_ADMIN_USER, {"username": username, "password_hash": password_hash})
+        return cur.fetchone()[0]
+
+
+def select_admin_user_by_username(conn: psycopg.Connection, *, username: str) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_ADMIN_USER_BY_USERNAME, {"username": username})
+        row = cur.fetchone()
+        if row is None:
+            return None
+        id, username, password_hash = row
+        return {"id": id, "username": username, "password_hash": password_hash}
+
+
+def count_admin_users(conn: psycopg.Connection) -> int:
+    with conn.cursor() as cur:
+        cur.execute(_COUNT_ADMIN_USERS)
+        return cur.fetchone()[0]
+
+
+def insert_endpoint(
+    conn: psycopg.Connection, *, address: str, label: str | None, tags: list[str]
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(_INSERT_ENDPOINT, {"address": address, "label": label, "tags": tags})
+        return cur.fetchone()[0]
+
+
+def select_endpoints(conn: psycopg.Connection) -> list[dict]:
+    """Um endpoint por linha, já com a classificação mais recente (ou None
+    se nenhuma rodada de discovery rodou pra ele ainda) -- ver o JOIN
+    LATERAL em select_endpoints.sql.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_ENDPOINTS)
+        return [
+            {
+                "id": id,
+                "address": address,
+                "label": label,
+                "tags": tags,
+                "created_at": created_at,
+                "classification": classification,
+                "confidence": confidence,
+                "scanned_at": scanned_at,
+            }
+            for id, address, label, tags, created_at, classification, confidence, scanned_at in cur.fetchall()
+        ]
+
+
+def select_endpoint_by_id(conn: psycopg.Connection, *, id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_ENDPOINT_BY_ID, {"id": id})
+        row = cur.fetchone()
+        if row is None:
+            return None
+        endpoint_id, address, label, tags, created_at = row
+        return {"id": endpoint_id, "address": address, "label": label, "tags": tags, "created_at": created_at}
+
+
+def delete_endpoint(conn: psycopg.Connection, *, id: int) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(_DELETE_ENDPOINT, {"id": id})
+        return cur.rowcount > 0
+
+
+def insert_discovery_result(
+    conn: psycopg.Connection,
+    *,
+    endpoint_id: int,
+    ip: str,
+    classification: str,
+    confidence: float,
+    evidence: dict,
+    scanned_at: str,
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            _INSERT_DISCOVERY_RESULT,
+            {
+                "endpoint_id": endpoint_id,
+                "ip": ip,
+                "classification": classification,
+                "confidence": confidence,
+                "evidence": Jsonb(evidence),
+                "scanned_at": scanned_at,
+            },
+        )
+        return cur.fetchone()[0]
+
+
+def select_latest_discovery_results_by_endpoint(conn: psycopg.Connection, *, endpoint_id: int) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_LATEST_DISCOVERY_RESULTS_BY_ENDPOINT, {"endpoint_id": endpoint_id})
+        return [
+            {
+                "ip": ip,
+                "classification": classification,
+                "confidence": confidence,
+                "evidence": evidence,
+                "scanned_at": scanned_at,
+            }
+            for ip, classification, confidence, evidence, scanned_at in cur.fetchall()
+        ]
 
 
 def select_contract_by_id(conn: psycopg.Connection, *, id: int) -> dict | None:
