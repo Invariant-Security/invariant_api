@@ -29,13 +29,14 @@ def _control_level(normalized_data: dict) -> int | None:
     return min(levels) if levels else None
 
 
-@router.post("/assess/{target}", response_model=list[Finding])
-def assess(target: str) -> list[Finding]:
-    try:
-        run = assessment_client.run_assessment(target)
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(e.response.status_code, e.response.text) from e
-
+def _findings_from_run(target_label: str, run: dict) -> list[Finding]:
+    """Turns invariant_assessment's {document, results: [...]}  response
+    into real Findings by joining each result against Postgres control
+    metadata by title. Shared by both the docker-exec assess route
+    (assess()) and the SSH-based endpoints.assess_discovered_endpoint()
+    route -- same join, different caller/target_label/assessment_client
+    function used to produce `run`.
+    """
     conn = db.connect()
     collected_at = datetime.now(timezone.utc).isoformat()
     findings = []
@@ -46,7 +47,7 @@ def assess(target: str) -> list[Finding]:
             raise HTTPException(422, f"none of {result['titles']!r} found for document {run['document']!r}")
         findings.append(
             Finding(
-                target=target,
+                target=target_label,
                 external_id=control["external_id"],
                 status=result["status"],
                 control_title=control["title"],
@@ -67,3 +68,12 @@ def assess(target: str) -> list[Finding]:
         )
     conn.close()
     return findings
+
+
+@router.post("/assess/{target}", response_model=list[Finding])
+def assess(target: str) -> list[Finding]:
+    try:
+        run = assessment_client.run_assessment(target)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(e.response.status_code, e.response.text) from e
+    return _findings_from_run(target, run)

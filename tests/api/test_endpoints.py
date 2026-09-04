@@ -5,12 +5,13 @@ exercised here -- see invariant_discovery's own tests for the scanning
 logic itself).
 """
 
+import httpx
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
 from invariant_api import main
-from invariant_api.clients import discovery_client
+from invariant_api.clients import assessment_client, discovery_client
 from invariant_api.storage import postgres as db
 
 pytestmark = pytest.mark.integration
@@ -145,3 +146,171 @@ def test_discover_propagates_discovery_service_failure_as_502(session_client, mo
     response = session_client.post(f"/endpoints/{endpoint_id}/discover")
 
     assert response.status_code == 502
+
+
+# --- POST /endpoints/{id}/assess (SSH-based remote assessment) ---
+#
+# _findings_from_run() joins each invariant_assessment result against
+# Postgres control metadata (db.select_control_by_title, called from
+# invariant_api.routes.assess) -- monkeypatched here the same way
+# discovery_client is monkeypatched above, since invariant_assessment
+# itself is a separate service/repo not exercised by this suite.
+
+_FAKE_DISCOVERY_RESULT = {
+    "ip": "10.0.0.5",
+    "classification": "linux",
+    "confidence": 0.91,
+    "evidence": {"open_ports": [22], "banners": {"22": "SSH-2.0-OpenSSH_9.2 Debian"}},
+    "scanned_at": "2026-09-02T00:00:00+00:00",
+}
+
+_FAKE_CONTROL = {
+    "external_id": "1.1.1",
+    "title": "Ensure SSH PermitRootLogin is disabled",
+    "source_name": "CIS",
+    "document_name": "CIS Debian Linux 12 Benchmark",
+    "publisher_version": "1.0.0",
+    "normalized_data": {"remediation": "Set PermitRootLogin to no.", "applicability": [{"level": 1}], "scored": True},
+    "raw_artifact_path": "raw/debian12.json",
+    "content_hash": "deadbeef",
+    "retrieved_at": None,
+}
+
+_FAKE_RUN = {
+    "document": "debian_linux_12",
+    "results": [
+        {
+            "titles": ["Ensure SSH PermitRootLogin is disabled"],
+            "status": "FAIL",
+            "evidence": "PermitRootLogin yes",
+        }
+    ],
+}
+
+
+def _discover_endpoint(session_client, monkeypatch, endpoint_id):
+    monkeypatch.setattr(discovery_client, "discover", lambda addresses: [_FAKE_DISCOVERY_RESULT])
+    response = session_client.post(f"/endpoints/{endpoint_id}/discover")
+    assert response.status_code == 200
+
+
+def test_assess_discovered_endpoint_requires_discovery_first(session_client):
+    endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
+
+    response = session_client.post(
+        f"/endpoints/{endpoint_id}/assess",
+        json={"username": "root", "auth_method": "password", "password": "hunter2"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_assess_discovered_endpoint_calls_assessment_client_with_ip_and_credentials(session_client, monkeypatch):
+    endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
+    _discover_endpoint(session_client, monkeypatch, endpoint_id)
+
+    captured = {}
+
+    def fake_run_assessment_remote(**kwargs):
+        captured.update(kwargs)
+        return _FAKE_RUN
+
+    monkeypatch.setattr(assessment_client, "run_assessment_remote", fake_run_assessment_remote)
+    monkeypatch.setattr(db, "select_control_by_title", lambda conn, *, document, titles: _FAKE_CONTROL)
+
+    response = session_client.post(
+        f"/endpoints/{endpoint_id}/assess",
+        json={"username": "root", "auth_method": "password", "password": "hunter2"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert isinstance(body, list)
+    assert len(body) == 1
+    assert body[0]["control_title"] == "Ensure SSH PermitRootLogin is disabled"
+    assert body[0]["status"] == "FAIL"
+
+    assert captured["host"] == "10.0.0.5"
+    assert captured["username"] == "root"
+    assert captured["auth_method"] == "password"
+    assert captured["password"] == "hunter2"
+
+
+def test_assess_discovered_endpoint_propagates_assessment_service_error(session_client, monkeypatch):
+    endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
+    _discover_endpoint(session_client, monkeypatch, endpoint_id)
+
+    def boom(**kwargs):
+        request = httpx.Request("POST", "http://assessment:8000/assessment/run-remote")
+        response = httpx.Response(401, request=request, text="bad SSH credentials")
+        raise httpx.HTTPStatusError("401", request=request, response=response)
+
+    monkeypatch.setattr(assessment_client, "run_assessment_remote", boom)
+
+    response = session_client.post(
+        f"/endpoints/{endpoint_id}/assess",
+        json={"username": "root", "auth_method": "password", "password": "wrong"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_assess_discovered_endpoint_requires_auth():
+    anonymous = TestClient(main.app)
+
+    response = anonymous.post(
+        "/endpoints/1/assess",
+        json={"username": "root", "auth_method": "password", "password": "hunter2"},
+    )
+
+    assert response.status_code == 401
+
+
+def _assert_marker_absent_from_table(conn, table, marker):
+    """Generic scan: every column of every row in `table`, stringified,
+    must not contain `marker`. Doesn't need updating if columns are added
+    later -- SELECT * picks them up automatically.
+    """
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT * FROM {table}")
+        rows = cur.fetchall()
+    for row in rows:
+        for value in row:
+            assert marker not in str(value), f"found marker in {table}: {value!r}"
+
+
+def test_submitted_credentials_never_persisted_to_db(session_client, monkeypatch):
+    endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
+    _discover_endpoint(session_client, monkeypatch, endpoint_id)
+
+    monkeypatch.setattr(assessment_client, "run_assessment_remote", lambda **kwargs: _FAKE_RUN)
+    monkeypatch.setattr(db, "select_control_by_title", lambda conn, *, document, titles: _FAKE_CONTROL)
+
+    marker = "SUPER-SECRET-MARKER-XYZ-DO-NOT-LEAK"
+    response = session_client.post(
+        f"/endpoints/{endpoint_id}/assess",
+        json={"username": "root", "auth_method": "password", "password": marker},
+    )
+    assert response.status_code == 200
+
+    conn = db.connect()
+    _assert_marker_absent_from_table(conn, "endpoints", marker)
+    _assert_marker_absent_from_table(conn, "discovery_results", marker)
+    conn.close()
+
+
+def test_submitted_credentials_never_in_response_body(session_client, monkeypatch):
+    endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
+    _discover_endpoint(session_client, monkeypatch, endpoint_id)
+
+    monkeypatch.setattr(assessment_client, "run_assessment_remote", lambda **kwargs: _FAKE_RUN)
+    monkeypatch.setattr(db, "select_control_by_title", lambda conn, *, document, titles: _FAKE_CONTROL)
+
+    marker = "SUPER-SECRET-MARKER-XYZ-DO-NOT-LEAK"
+    response = session_client.post(
+        f"/endpoints/{endpoint_id}/assess",
+        json={"username": "root", "auth_method": "password", "password": marker},
+    )
+
+    assert response.status_code == 200
+    assert marker not in response.text
