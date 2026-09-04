@@ -20,6 +20,11 @@ services:
       POSTGRES_DB: invariant
     volumes: ["pgdata_dev:/var/lib/postgresql/data"]
     expose: ["5432"]
+    # Porta incomum, loopback-only -- só pra permitir rodar a suíte de
+    # integração (pytest -m integration) direto do host durante
+    # desenvolvimento/CI local. Nada dentro da stack usa isso -- os outros
+    # serviços continuam falando com `postgres:5432` pela rede interna.
+    ports: ["127.0.0.1:55432:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U invariant"]
       interval: 10s
