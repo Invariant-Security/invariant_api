@@ -7,13 +7,18 @@
 # na máquina do cliente. Sem `depends_on`, mesma disciplina de
 # docker-compose.yml/.dev.yml.
 #
-# Rodado pelo systemd unit que o .deb instala (ver invariant_packaging/) --
-# não é pra rodar direto num dev local, use docker-compose.dev.yml pra isso.
+# Rodado pelo systemd unit que o .deb instala, OU direto pelo install.sh
+# (ver invariant_packaging/) -- por isso todo serviço tem `restart:
+# unless-stopped`: no canal install.sh não existe unit de systemd pra
+# trazer o stack de volta depois de um reboot, só o próprio restart policy
+# do Docker (cujo daemon já se auto-habilita no boot). Não é pra rodar
+# direto num dev local, use docker-compose.dev.yml pra isso.
 name: invariant-appliance
 
 services:
   postgres:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: invariant
       POSTGRES_PASSWORD: invariant
@@ -28,6 +33,7 @@ services:
 
   assessment:
     image: ${INVARIANT_IMAGE_REGISTRY:-ghcr.io/invariant-security}/invariant-assessment:${INVARIANT_VERSION:-latest}
+    restart: unless-stopped
     volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
     expose: ["8000"]
     healthcheck:
@@ -38,6 +44,7 @@ services:
 
   ingestion:
     image: ${INVARIANT_IMAGE_REGISTRY:-ghcr.io/invariant-security}/invariant-ingestion:${INVARIANT_VERSION:-latest}
+    restart: unless-stopped
     volumes: ["appliance_data_raw:/app/data/raw"]
     expose: ["8000"]
     healthcheck:
@@ -48,6 +55,7 @@ services:
 
   discovery:
     image: ${INVARIANT_IMAGE_REGISTRY:-ghcr.io/invariant-security}/invariant-discovery:${INVARIANT_VERSION:-latest}
+    restart: unless-stopped
     expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
@@ -57,6 +65,7 @@ services:
 
   api:
     image: ${INVARIANT_IMAGE_REGISTRY:-ghcr.io/invariant-security}/invariant-api:${INVARIANT_VERSION:-latest}
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://invariant:invariant@postgres:5432/invariant
       INVARIANT_ASSESSMENT_URL: http://assessment:8000
@@ -80,6 +89,7 @@ services:
 
   web:
     image: ${INVARIANT_IMAGE_REGISTRY:-ghcr.io/invariant-security}/invariant-web:${INVARIANT_VERSION:-latest}
+    restart: unless-stopped
     ports: ["${INVARIANT_WEB_PORT:-80}:80"]
     volumes:
       # Roteamento único (só a porta do web, sem porta de API separada
