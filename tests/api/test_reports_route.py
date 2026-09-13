@@ -52,3 +52,28 @@ def test_empty_findings_list_still_returns_a_pdf():
 
     assert response.status_code == 200
     assert response.content.startswith(b"%PDF-")
+
+
+def test_consolidated_report_returns_pdf():
+    response = client.post(
+        "/reports/pdf",
+        json={
+            "title": "Consolidated Assessment",
+            "kind": "consolidated",
+            "assets": [
+                {"name": "tamois", "status": "success", "findings": [_FINDING]},
+                {"name": "babybet", "status": "error", "findings": [], "error": "HTTP 502"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert 'filename="invariant-consolidated-report.pdf"' in response.headers["content-disposition"]
+    assert response.content.startswith(b"%PDF-")
+
+
+def test_consolidated_report_with_no_assets_still_returns_a_pdf():
+    response = client.post("/reports/pdf", json={"title": "Consolidated Assessment", "kind": "consolidated"})
+
+    assert response.status_code == 200
+    assert response.content.startswith(b"%PDF-")

@@ -1,8 +1,13 @@
 """PDF report generation from a list of Finding -- two audiences, same
-input data. CEO report: pass/fail summary + control titles only, no raw
-evidence/remediation text (that's what makes it readable by a
-non-technical exec). Technical report: every finding, full detail, for
-whoever actually fixes things.
+input data. CEO report: executive posture + risk summary + narrative key
+risks by domain, no raw evidence/remediation text. Technical report:
+every finding, full detail, organized so "what failed and how do I fix
+it" comes first and "everything that passed" is an appendix.
+
+See finding_taxonomy.py for the two classifications both reports lean on:
+`classify_domain` (cosmetic grouping) and `classify_environment` (whether
+a control even applies to a Docker container -- feeds the compliance %
+directly, so it's a reviewed lookup table, not a runtime heuristic).
 
 Pure functions, no Postgres/HTTP here -- routes/reports.py is the only
 caller, same separation invariant_api's other report-shaped modules
@@ -11,7 +16,9 @@ same "orchestration in routes, logic elsewhere" split).
 """
 
 import io
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from typing import NamedTuple
 from xml.sax.saxutils import escape
 
 from invariant_contracts import Finding
@@ -21,12 +28,20 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from invariant_api.finding_taxonomy import DOMAIN_NARRATIVE, classify_domain, classify_environment
+
 _styles = getSampleStyleSheet()
 _TABLE_HEADER_STYLE = [
     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1d2b4f")),
     ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
     ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
     ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ("FONTSIZE", (0, 0), (-1, -1), 9),
+]
+_PLAIN_TABLE_STYLE = [
+    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ("FONTSIZE", (0, 0), (-1, -1), 9),
 ]
 
 
@@ -46,91 +61,375 @@ def _cover(title: str, subtitle: str) -> list:
     ]
 
 
+def split_findings(findings: list[Finding]):
+    """Buckets every finding into exactly one of four groups, checked in
+    this priority order: a status outside PASS/FAIL always means "not
+    assessed" regardless of environment (today's pipeline never produces
+    a third status, but this must not assume it never will); otherwise a
+    host-only control is "not applicable" regardless of PASS/FAIL (this
+    is what keeps a host-only PASS from inflating compliance just as much
+    as a host-only FAIL would deflate it); otherwise it's a real PASS or
+    FAIL. Returns (applicable_pass, applicable_fail, not_assessed, not_applicable).
+    """
+    applicable_pass: list[Finding] = []
+    applicable_fail: list[Finding] = []
+    not_assessed: list[Finding] = []
+    not_applicable: list[Finding] = []
+    for f in findings:
+        if f.status not in ("PASS", "FAIL"):
+            not_assessed.append(f)
+        elif classify_environment(f) == "host_only":
+            not_applicable.append(f)
+        elif f.status == "FAIL":
+            applicable_fail.append(f)
+        else:
+            applicable_pass.append(f)
+    return applicable_pass, applicable_fail, not_assessed, not_applicable
+
+
+def compliance_pct(applicable_pass: list[Finding], applicable_fail: list[Finding]) -> int | None:
+    """None means "nothing applicable was actually evaluated" -- render
+    as "N/A", never "0%" (0% asserts "everything evaluated failed",  a
+    different and stronger claim).
+    """
+    evaluated = len(applicable_pass) + len(applicable_fail)
+    return round(100 * len(applicable_pass) / evaluated) if evaluated else None
+
+
+def _progress_bar(pct: int | None, width: int = 20) -> str:
+    if pct is None:
+        return "[" + "░" * width + "] N/A"
+    filled = round(width * pct / 100)
+    return "[" + "█" * filled + "░" * (width - filled) + f"] {pct}%"
+
+
+def _summary_line(applicable_pass, applicable_fail, not_assessed, not_applicable, total: int, pct_text: str) -> str:
+    parts = f"{len(applicable_pass)} passed / {len(applicable_fail)} failed"
+    if not_assessed:
+        parts += f" / {len(not_assessed)} not assessed"
+    if not_applicable:
+        parts += f" / {len(not_applicable)} not applicable"
+    return f"{total} controls evaluated against CIS benchmarks. {pct_text} compliant ({parts})."
+
+
 def build_ceo_report(title: str, findings: list[Finding]) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter, title=f"Invariant — {title}")
 
-    # Explicit status filters, not "anything not FAIL counts as PASS" (or
-    # vice versa) -- today's pipeline only ever produces PASS/FAIL, but
-    # this must stay correct if a third status (e.g. "NOT ASSESSED") ever
-    # shows up, rather than silently mis-stating the total.
-    passed = [f for f in findings if f.status == "PASS"]
-    failed = [f for f in findings if f.status == "FAIL"]
-    other = [f for f in findings if f.status not in ("PASS", "FAIL")]
-    level1_failed = _sorted_by_level([f for f in failed if f.level == 1])
-    total = len(findings)
-    pct = round(100 * len(passed) / total) if total else 0
-
-    summary = f"{total} controls evaluated against CIS benchmarks. {pct}% compliant ({len(passed)} passed / {len(failed)} failed"
-    summary += f" / {len(other)} not assessed" if other else ""
-    summary += ")."
+    applicable_pass, applicable_fail, not_assessed, not_applicable = split_findings(findings)
+    pct = compliance_pct(applicable_pass, applicable_fail)
+    pct_text = "N/A" if pct is None else f"{pct}%"
+    bar_style = ParagraphStyle("bar", parent=_styles["Normal"], fontName="Courier")
 
     story = _cover(title, "Executive Summary")
-    story.append(Paragraph(summary, _styles["Normal"]))
-    story.append(Spacer(1, 0.15 * inch))
     story.append(
         Paragraph(
-            f"{len(level1_failed)} high-priority (CIS Level 1) issue(s) require attention."
-            if level1_failed
-            else "No high-priority (CIS Level 1) issues found.",
+            _summary_line(applicable_pass, applicable_fail, not_assessed, not_applicable, len(findings), pct_text),
             _styles["Normal"],
         )
     )
+    story.append(Spacer(1, 0.1 * inch))
+    story.append(Paragraph(_progress_bar(pct), bar_style))
     story.append(Spacer(1, 0.3 * inch))
 
-    if level1_failed:
-        story.append(Paragraph("Top Priority Issues", _styles["Heading2"]))
-        rows = [["Control"]] + [[escape(f.control_title)] for f in level1_failed]
-        table = Table(rows, colWidths=[6.5 * inch])
-        table.setStyle(TableStyle(_TABLE_HEADER_STYLE + [("FONTSIZE", (0, 0), (-1, -1), 9)]))
-        story.append(table)
+    level1 = [f for f in applicable_fail if f.level == 1]
+    level2 = [f for f in applicable_fail if f.level == 2]
+    other_level = [f for f in applicable_fail if f.level not in (1, 2)]
+
+    story.append(Paragraph("Risk Summary", _styles["Heading2"]))
+    risk_rows = [
+        ["CIS Level 1 failures", str(len(level1))],
+        ["CIS Level 2 failures", str(len(level2))],
+        ["Other failures", str(len(other_level))],
+        ["Not Applicable", str(len(not_applicable))],
+    ]
+    risk_table = Table(risk_rows, colWidths=[4.5 * inch, 2 * inch])
+    risk_table.setStyle(TableStyle(_PLAIN_TABLE_STYLE))
+    story.append(risk_table)
+    story.append(Spacer(1, 0.3 * inch))
+
+    domain_counts = Counter(classify_domain(f.control_title) for f in applicable_fail)
+    top_domains = domain_counts.most_common(4)
+    if top_domains:
+        story.append(Paragraph("Key Risks", _styles["Heading2"]))
+        for i, (domain, count) in enumerate(top_domains, start=1):
+            story.append(Paragraph(f"{i}. {escape(domain)} ({count})", _styles["Heading3"]))
+            story.append(Paragraph(escape(DOMAIN_NARRATIVE.get(domain, DOMAIN_NARRATIVE["Other"])), _styles["Normal"]))
+        story.append(Spacer(1, 0.2 * inch))
+
+    story.append(Paragraph("Recommended Next Actions", _styles["Heading2"]))
+    actions = []
+    if top_domains:
+        top_names = " and ".join(d for d, _ in top_domains[:2])
+        actions.append(f"Address {top_names} findings first.")
+    actions.append("Review authentication and access policies.")
+    actions.append("Validate environment applicability before treating Not Applicable items as resolved.")
+    actions.append("Re-run this assessment after remediation.")
+    for action in actions:
+        story.append(Paragraph(f"• {escape(action)}", _styles["Normal"]))
 
     doc.build(story)
     return buf.getvalue()
 
 
-# NOT a table. A real assessment's remediation text runs well past 4000
-# characters on some controls (checked live against tamois's 199-control
-# run) -- squeezed into a ~1.75in table column that wraps into a single
-# row taller than a whole page, which reportlab's Table.split() cannot
-# break (LayoutError: "too large"), no matter how few rows share that
-# table. Free-flowing Paragraphs per finding have no such ceiling: each
-# one splits across a page boundary on its own like any body text.
+# NOT a table for full findings. A real assessment's remediation text runs
+# well past 4000 characters on some controls (checked live against
+# tamois's 199-control run) -- squeezed into a ~1.75in table column that
+# wraps into a single row taller than a whole page, which reportlab's
+# Table.split() cannot break (LayoutError: "too large"), no matter how few
+# rows share that table. Free-flowing Paragraphs per finding have no such
+# ceiling: each one splits across a page boundary on its own like any body
+# text. Short, uniform rows (Not Applicable / Passed Controls, id+title
+# only, no evidence/remediation) stay as plain tables -- no single cell
+# there is at risk of that failure mode.
 _FINDING_HEADER_STYLE = ParagraphStyle("finding_header", parent=_styles["Heading3"], spaceBefore=10, spaceAfter=2)
 _FINDING_META_STYLE = ParagraphStyle("finding_meta", parent=_styles["Normal"], fontSize=8, textColor=colors.grey)
 _FINDING_LABEL_STYLE = ParagraphStyle(
     "finding_label", parent=_styles["Normal"], fontSize=8, textColor=colors.grey, spaceBefore=6
 )
 _FINDING_BODY_STYLE = ParagraphStyle("finding_body", parent=_styles["Normal"], fontSize=9, leading=12)
+_FINDING_WHY_STYLE = ParagraphStyle(
+    "finding_why", parent=_FINDING_BODY_STYLE, textColor=colors.grey, fontName="Helvetica-Oblique"
+)
 _STATUS_COLOR = {"PASS": "#0f6b3f", "FAIL": "#b91c1c"}
+
+
+def _append_finding_detail(story: list, f: Finding) -> None:
+    level_text = f"L{f.level}" if f.level is not None else "—"
+    status_color = _STATUS_COLOR.get(f.status, "#000000")
+    domain = classify_domain(f.control_title)
+    story.append(
+        Paragraph(
+            f'<font color="{status_color}"><b>{escape(f.status)}</b></font> '
+            f"{escape(f.external_id)} — {escape(f.control_title)} ({level_text})",
+            _FINDING_HEADER_STYLE,
+        )
+    )
+    story.append(
+        Paragraph(
+            f"{escape(domain)} · {escape(f.source_name)}/{escape(f.document_name)} v{escape(f.document_version)}",
+            _FINDING_META_STYLE,
+        )
+    )
+    story.append(Paragraph("Evidence", _FINDING_LABEL_STYLE))
+    story.append(Paragraph(escape(f.evidence_output) or "—", _FINDING_BODY_STYLE))
+    if f.remediation:
+        story.append(Paragraph("Remediation", _FINDING_LABEL_STYLE))
+        story.append(Paragraph(escape(f.remediation), _FINDING_BODY_STYLE))
+    story.append(Paragraph(escape(DOMAIN_NARRATIVE.get(domain, DOMAIN_NARRATIVE["Other"])), _FINDING_WHY_STYLE))
+
+
+def _compact_control_table(findings: list[Finding], extra_col: str | None = None) -> Table:
+    header = ["ID", "Control"] + ([extra_col] if extra_col else [])
+    rows = [header]
+    for f in _sorted_by_level(findings):
+        row = [escape(f.external_id), escape(f.control_title)]
+        if extra_col:
+            row.append(f.status)
+        rows.append(row)
+    col_widths = [0.8 * inch, 5.5 * inch] if not extra_col else [0.7 * inch, 4.9 * inch, 0.7 * inch]
+    table = Table(rows, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle(_TABLE_HEADER_STYLE))
+    return table
+
+
+class ConsolidatedAsset(NamedTuple):
+    """One container's outcome from a batch "Run selected" -- `findings`
+    is empty when `status == "error"` (the individual assessment call
+    itself failed; `error` carries why). routes/reports.py builds these
+    from the request body; kept as a plain NamedTuple here (not the
+    request's pydantic model) so this module stays free of API-layer
+    concerns.
+    """
+
+    name: str
+    status: str  # "success" | "error"
+    findings: list[Finding]
+    error: str | None
+
+
+def build_consolidated_report(assets: list[ConsolidatedAsset]) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, title="Invariant — Consolidated Assessment")
+
+    succeeded = [a for a in assets if a.status == "success"]
+    errored = [a for a in assets if a.status != "success"]
+
+    story = _cover("Consolidated Assessment", "Fleet Overview")
+
+    story.append(Paragraph("Executive Overview", _styles["Heading2"]))
+    story.append(
+        Paragraph(
+            f"{len(assets)} selected / {len(succeeded)} assessed / {len(errored)} failed.",
+            _styles["Normal"],
+        )
+    )
+    if errored:
+        names = ", ".join(escape(a.name) for a in errored)
+        story.append(Paragraph(f"Failed to assess: {names}", _styles["Normal"]))
+
+    total_controls = sum(len(a.findings) for a in succeeded)
+    benchmarks = sorted({f"{f.document_name} v{f.document_version}" for a in succeeded for f in a.findings})
+    story.append(Paragraph(f"Total controls evaluated: {total_controls}", _styles["Normal"]))
+    if benchmarks:
+        story.append(Paragraph(f"Benchmarks: {escape(', '.join(benchmarks))}", _styles["Normal"]))
+    story.append(Spacer(1, 0.3 * inch))
+
+    if not succeeded:
+        doc.build(story)
+        return buf.getvalue()
+
+    story.append(Paragraph("Compliance by Asset", _styles["Heading2"]))
+    asset_pct = []
+    for a in succeeded:
+        applicable_pass, applicable_fail, _, _ = split_findings(a.findings)
+        asset_pct.append((a.name, compliance_pct(applicable_pass, applicable_fail)))
+    # Worst first; assets with nothing applicable evaluated (N/A) go last
+    # -- they're not "bad", there's just nothing to rank.
+    asset_pct.sort(key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0))
+    rows = [["Asset", "% Compliant"]] + [
+        [escape(name), "N/A" if pct is None else f"{pct}%"] for name, pct in asset_pct
+    ]
+    table = Table(rows, colWidths=[4.5 * inch, 2 * inch], repeatRows=1)
+    table.setStyle(TableStyle(_TABLE_HEADER_STYLE))
+    story.append(table)
+    story.append(Spacer(1, 0.3 * inch))
+
+    # Prevalence keyed by control_title (stable across benchmark
+    # documents/versions, unlike external_id -- see Check.titles' own
+    # docstring in invariant_assessment) -- denominator is "assets where
+    # this control was actually evaluated and applicable", never the raw
+    # asset count, since a mixed-OS batch won't have every control apply
+    # to every asset.
+    by_title: dict[str, list[Finding]] = defaultdict(list)
+    for a in succeeded:
+        for f in a.findings:
+            by_title[f.control_title].append(f)
+
+    prevalence = []
+    for title, group in by_title.items():
+        applicable = [f for f in group if f.status in ("PASS", "FAIL") and classify_environment(f) == "container_relevant"]
+        affected = [f for f in applicable if f.status == "FAIL"]
+        if applicable and affected:
+            prevalence.append((title, len(affected), len(applicable)))
+    prevalence.sort(key=lambda item: -item[1])
+
+    if prevalence:
+        story.append(Paragraph("Most Prevalent Failures", _styles["Heading2"]))
+        rows = [["Control", "Affected"]] + [
+            [escape(title), f"{affected} / {applicable} applicable containers"]
+            for title, affected, applicable in prevalence[:15]
+        ]
+        table = Table(rows, colWidths=[4.3 * inch, 2.2 * inch], repeatRows=1)
+        table.setStyle(TableStyle(_TABLE_HEADER_STYLE))
+        story.append(table)
+        story.append(Spacer(1, 0.3 * inch))
+
+    domain_assets: dict[str, set[str]] = defaultdict(set)
+    for a in succeeded:
+        _, applicable_fail, _, _ = split_findings(a.findings)
+        for f in applicable_fail:
+            domain_assets[classify_domain(f.control_title)].add(a.name)
+    domain_counts = sorted(domain_assets.items(), key=lambda item: -len(item[1]))
+
+    if domain_counts:
+        story.append(Paragraph("Affected Domains", _styles["Heading2"]))
+        rows = [["Domain", "Assets Affected"]] + [[escape(d), str(len(names))] for d, names in domain_counts]
+        table = Table(rows, colWidths=[4.5 * inch, 2 * inch])
+        table.setStyle(TableStyle(_TABLE_HEADER_STYLE))
+        story.append(table)
+        story.append(Spacer(1, 0.3 * inch))
+
+    story.append(Paragraph("Next Actions", _styles["Heading2"]))
+    story.append(
+        Paragraph(
+            "Refer to each asset's individual technical report for full evidence and remediation steps.",
+            _styles["Normal"],
+        )
+    )
+
+    doc.build(story)
+    return buf.getvalue()
 
 
 def build_technical_report(title: str, findings: list[Finding]) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter, title=f"Invariant — {title} — Technical")
 
+    applicable_pass, applicable_fail, not_assessed, not_applicable = split_findings(findings)
+    pct = compliance_pct(applicable_pass, applicable_fail)
+    pct_text = "N/A" if pct is None else f"{pct}%"
+
     story = _cover(title, "Technical Report — full findings")
-    for f in _sorted_by_level(findings):
-        level_text = f"L{f.level}" if f.level is not None else "—"
-        status_color = _STATUS_COLOR.get(f.status, "#000000")
+
+    story.append(Paragraph("Assessment Summary", _styles["Heading2"]))
+    story.append(
+        Paragraph(
+            _summary_line(applicable_pass, applicable_fail, not_assessed, not_applicable, len(findings), pct_text),
+            _styles["Normal"],
+        )
+    )
+    story.append(Spacer(1, 0.15 * inch))
+
+    domain_rows = [["Domain", "PASS", "FAIL", "N/A"]]
+    domains_seen = sorted({classify_domain(f.control_title) for f in findings})
+    for domain in domains_seen:
+        p = sum(1 for f in applicable_pass if classify_domain(f.control_title) == domain)
+        fl = sum(1 for f in applicable_fail if classify_domain(f.control_title) == domain)
+        na = sum(1 for f in not_applicable if classify_domain(f.control_title) == domain)
+        if p + fl + na == 0:
+            continue
+        domain_rows.append([domain, str(p), str(fl), str(na)])
+    if len(domain_rows) > 1:
+        domain_table = Table(domain_rows, colWidths=[3.2 * inch, 1.1 * inch, 1.1 * inch, 1.1 * inch])
+        domain_table.setStyle(TableStyle(_TABLE_HEADER_STYLE))
+        story.append(domain_table)
+    story.append(Spacer(1, 0.3 * inch))
+
+    if applicable_fail:
+        story.append(Paragraph(f"Failed Controls ({len(applicable_fail)})", _styles["Heading2"]))
+        for domain in sorted({classify_domain(f.control_title) for f in applicable_fail}):
+            group = [f for f in applicable_fail if classify_domain(f.control_title) == domain]
+            for f in _sorted_by_level(group):
+                _append_finding_detail(story, f)
+        story.append(Spacer(1, 0.2 * inch))
+
+    if not_assessed:
+        story.append(Paragraph(f"Not Assessed ({len(not_assessed)})", _styles["Heading2"]))
+        story.append(
+            Paragraph("Invariant could not determine a PASS/FAIL result for these controls.", _styles["Normal"])
+        )
+        story.append(_compact_control_table(not_assessed, extra_col="Status"))
+        story.append(Spacer(1, 0.2 * inch))
+
+    if not_applicable:
+        story.append(Paragraph(f"Not Applicable ({len(not_applicable)})", _styles["Heading2"]))
         story.append(
             Paragraph(
-                f'<font color="{status_color}"><b>{escape(f.status)}</b></font> '
-                f"{escape(f.external_id)} — {escape(f.control_title)} ({level_text})",
-                _FINDING_HEADER_STYLE,
+                "These controls do not apply to a containerized environment "
+                "(e.g. bootloader, kernel modules, host-level firewall/cron/time "
+                "synchronization) and are excluded from the compliance percentage above.",
+                _styles["Normal"],
             )
         )
+        story.append(_compact_control_table(not_applicable, extra_col="Status"))
+        story.append(Spacer(1, 0.2 * inch))
+
+    if applicable_pass:
+        story.append(Paragraph(f"Passed Controls ({len(applicable_pass)})", _styles["Heading2"]))
+        story.append(_compact_control_table(applicable_pass))
+
+    story.append(Spacer(1, 0.2 * inch))
+    story.append(Paragraph("Assessment Metadata", _styles["Heading2"]))
+    if findings:
+        first = findings[0]
         story.append(
             Paragraph(
-                f"{escape(f.source_name)}/{escape(f.document_name)} v{escape(f.document_version)}",
-                _FINDING_META_STYLE,
+                f"Benchmark: {escape(first.source_name)}/{escape(first.document_name)} v{escape(first.document_version)}",
+                _styles["Normal"],
             )
         )
-        story.append(Paragraph("Evidence", _FINDING_LABEL_STYLE))
-        story.append(Paragraph(escape(f.evidence_output) or "—", _FINDING_BODY_STYLE))
-        if f.remediation:
-            story.append(Paragraph("Remediation", _FINDING_LABEL_STYLE))
-            story.append(Paragraph(escape(f.remediation), _FINDING_BODY_STYLE))
+    story.append(Paragraph(f"Total controls: {len(findings)}", _styles["Normal"]))
 
     doc.build(story)
     return buf.getvalue()
