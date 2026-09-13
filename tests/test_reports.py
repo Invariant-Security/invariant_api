@@ -246,6 +246,18 @@ def test_consolidated_prevalence_excludes_host_only_findings(monkeypatch):
     assert "bootloader" not in text.lower()  # host-only, never counted as a prevalent failure
 
 
+def test_consolidated_domain_names_are_not_double_escaped():
+    # Regression: plain Table cells (unlike Paragraph) never parse markup,
+    # so xml.sax.saxutils.escape()'ing a domain name like "Authentication
+    # & PAM" before putting it in a Table row left a literal "&amp;" on
+    # the page -- caught visually against a real 4-container batch.
+    findings = [_finding(control_title="Ensure pam_faillock module is enabled", status="FAIL")]
+    text = _extract_text(build_consolidated_report([_asset("tamois", findings)]))
+
+    assert "Authentication & PAM" in text
+    assert "&amp;" not in text
+
+
 def test_consolidated_compliance_by_asset_uses_the_same_evaluated_formula():
     assets = [
         _asset("good", [_finding(external_id="1", status="PASS"), _finding(external_id="2", status="FAIL")]),

@@ -223,7 +223,10 @@ def _compact_control_table(findings: list[Finding], extra_col: str | None = None
     header = ["ID", "Control"] + ([extra_col] if extra_col else [])
     rows = [header]
     for f in _sorted_by_level(findings):
-        row = [escape(f.external_id), escape(f.control_title)]
+        # Plain Table cells (unlike Paragraph) never parse markup, so
+        # escape() here would leave literal "&amp;" etc. on the page --
+        # see the same reasoning at the other Table row-builders below.
+        row = [f.external_id, f.control_title]
         if extra_col:
             row.append(f.status)
         rows.append(row)
@@ -288,7 +291,7 @@ def build_consolidated_report(assets: list[ConsolidatedAsset]) -> bytes:
     # -- they're not "bad", there's just nothing to rank.
     asset_pct.sort(key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0))
     rows = [["Asset", "% Compliant"]] + [
-        [escape(name), "N/A" if pct is None else f"{pct}%"] for name, pct in asset_pct
+        [name, "N/A" if pct is None else f"{pct}%"] for name, pct in asset_pct
     ]
     table = Table(rows, colWidths=[4.5 * inch, 2 * inch], repeatRows=1)
     table.setStyle(TableStyle(_TABLE_HEADER_STYLE))
@@ -317,7 +320,7 @@ def build_consolidated_report(assets: list[ConsolidatedAsset]) -> bytes:
     if prevalence:
         story.append(Paragraph("Most Prevalent Failures", _styles["Heading2"]))
         rows = [["Control", "Affected"]] + [
-            [escape(title), f"{affected} / {applicable} applicable containers"]
+            [title, f"{affected} / {applicable} applicable containers"]
             for title, affected, applicable in prevalence[:15]
         ]
         table = Table(rows, colWidths=[4.3 * inch, 2.2 * inch], repeatRows=1)
@@ -334,7 +337,7 @@ def build_consolidated_report(assets: list[ConsolidatedAsset]) -> bytes:
 
     if domain_counts:
         story.append(Paragraph("Affected Domains", _styles["Heading2"]))
-        rows = [["Domain", "Assets Affected"]] + [[escape(d), str(len(names))] for d, names in domain_counts]
+        rows = [["Domain", "Assets Affected"]] + [[d, str(len(names))] for d, names in domain_counts]
         table = Table(rows, colWidths=[4.5 * inch, 2 * inch])
         table.setStyle(TableStyle(_TABLE_HEADER_STYLE))
         story.append(table)
