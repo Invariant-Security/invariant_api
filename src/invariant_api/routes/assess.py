@@ -77,3 +77,15 @@ def assess(target: str) -> list[Finding]:
     except httpx.HTTPStatusError as e:
         raise HTTPException(e.response.status_code, e.response.text) from e
     return _findings_from_run(target, run)
+
+
+@router.get("/containers")
+def list_containers() -> list[dict]:
+    """Candidates for POST /assess/{target} -- every container on this
+    host, minus invariant's own stack (appliance/demo/infra, not a client
+    asset -- the "invariant-" prefix is a naming convention this project
+    controls, not a guess). No auth, same intentional decision as the
+    rest of this module for this phase of the project.
+    """
+    containers = assessment_client.list_containers()
+    return [c for c in containers if not c["name"].startswith("invariant-")]

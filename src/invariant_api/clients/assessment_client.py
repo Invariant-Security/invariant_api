@@ -11,6 +11,17 @@ import httpx
 BASE_URL = os.environ.get("INVARIANT_ASSESSMENT_URL", "http://assessment:8000")
 
 
+def list_containers() -> list[dict]:
+    """Returns [{"name": str, "image": str}, ...] -- every container this
+    host's Docker socket can see, candidates for run_assessment()'s
+    `target`. See invariant_assessment's api.py for the exact
+    response_model.
+    """
+    resp = httpx.get(f"{BASE_URL}/assessment/containers", timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def run_assessment(target: str) -> dict:
     """Returns {"document": str, "results": [{"titles": [...], "status":
     "PASS"|"FAIL", "evidence": str}, ...]} -- see invariant_assessment's
