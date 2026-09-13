@@ -79,6 +79,25 @@ def test_ceo_report_summarizes_pass_fail_counts():
     assert "50% compliant" in text
 
 
+def test_ceo_report_does_not_misrepresent_totals_with_a_third_status():
+    # Defensive: nothing in the pipeline produces a status other than
+    # PASS/FAIL today, but the counting must not assume that -- a finding
+    # with e.g. "NOT ASSESSED" must show up explicitly, not get silently
+    # dropped from both the pass and fail buckets.
+    findings = [
+        _finding(external_id="1", status="PASS", level=1),
+        _finding(external_id="2", status="FAIL", level=1),
+        _finding(external_id="3", status="NOT ASSESSED", level=1),
+    ]
+
+    text = _extract_text(build_ceo_report("tamois", findings))
+
+    assert "3 controls evaluated" in text
+    assert "1 passed" in text
+    assert "1 failed" in text
+    assert "1 not assessed" in text
+
+
 def test_technical_report_handles_a_full_size_real_assessment():
     # Regression test: a table-based layout reliably raised
     # reportlab.platypus.doctemplate.LayoutError ("too large") once any

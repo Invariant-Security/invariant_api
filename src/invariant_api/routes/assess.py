@@ -10,7 +10,7 @@ an HTTP call instead of iterating CHECKS/facts directly).
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from invariant_contracts import Finding
 
 from invariant_api.clients import assessment_client
@@ -89,3 +89,19 @@ def list_containers() -> list[dict]:
     """
     containers = assessment_client.list_containers()
     return [c for c in containers if not c["name"].startswith("invariant-")]
+
+
+@router.get("/containers/{name}/check")
+def check_container(name: str, response: Response) -> dict:
+    """Cheap pre-flight for POST /assess/{name} -- detects OS, checks it
+    against the same family_for_os() gate assess() itself hits, but never
+    runs the 199 CHECKS. GET is semantically fine here (a read of the
+    container's current, discoverable state), but that state can change
+    if the container gets recreated under the same name -- no-store keeps
+    an intermediary from serving a stale answer.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return assessment_client.check_target(name)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(e.response.status_code, e.response.text) from e

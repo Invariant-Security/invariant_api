@@ -50,20 +50,23 @@ def build_ceo_report(title: str, findings: list[Finding]) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter, title=f"Invariant — {title}")
 
+    # Explicit status filters, not "anything not FAIL counts as PASS" (or
+    # vice versa) -- today's pipeline only ever produces PASS/FAIL, but
+    # this must stay correct if a third status (e.g. "NOT ASSESSED") ever
+    # shows up, rather than silently mis-stating the total.
     passed = [f for f in findings if f.status == "PASS"]
     failed = [f for f in findings if f.status == "FAIL"]
+    other = [f for f in findings if f.status not in ("PASS", "FAIL")]
     level1_failed = _sorted_by_level([f for f in failed if f.level == 1])
     total = len(findings)
     pct = round(100 * len(passed) / total) if total else 0
 
+    summary = f"{total} controls evaluated against CIS benchmarks. {pct}% compliant ({len(passed)} passed / {len(failed)} failed"
+    summary += f" / {len(other)} not assessed" if other else ""
+    summary += ")."
+
     story = _cover(title, "Executive Summary")
-    story.append(
-        Paragraph(
-            f"{total} controls evaluated against CIS benchmarks. "
-            f"{pct}% compliant ({len(passed)} passed / {len(failed)} failed).",
-            _styles["Normal"],
-        )
-    )
+    story.append(Paragraph(summary, _styles["Normal"]))
     story.append(Spacer(1, 0.15 * inch))
     story.append(
         Paragraph(

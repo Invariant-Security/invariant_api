@@ -34,3 +34,39 @@ def test_empty_list_returns_empty_array(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_check_container_proxies_check_target(monkeypatch):
+    monkeypatch.setattr(
+        assess.assessment_client,
+        "check_target",
+        lambda name: {
+            "testable": True,
+            "os_id": "debian",
+            "os_version_id": "12",
+            "family": "debian_ubuntu",
+            "reason_code": None,
+            "reason": None,
+        },
+    )
+
+    response = client.get("/containers/tamois/check")
+
+    assert response.status_code == 200
+    assert response.json()["testable"] is True
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_check_container_upstream_error_propagates_status(monkeypatch):
+    import httpx
+
+    def raise_error(name):
+        request = httpx.Request("POST", "http://assessment/assessment/check")
+        response = httpx.Response(502, request=request, text="assessment unreachable")
+        raise httpx.HTTPStatusError("boom", request=request, response=response)
+
+    monkeypatch.setattr(assess.assessment_client, "check_target", raise_error)
+
+    response = client.get("/containers/tamois/check")
+
+    assert response.status_code == 502

@@ -22,6 +22,17 @@ def list_containers() -> list[dict]:
     return resp.json()
 
 
+def check_target(target: str) -> dict:
+    """Returns {"testable": bool, "os_id": str|None, "os_version_id":
+    str|None, "family": str|None, "reason_code": str|None, "reason":
+    str|None} -- see invariant_assessment's api.py for the exact
+    response_model. Cheap pre-flight for run_assessment()'s `target`.
+    """
+    resp = httpx.post(f"{BASE_URL}/assessment/check", params={"target": target}, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def run_assessment(target: str) -> dict:
     """Returns {"document": str, "results": [{"titles": [...], "status":
     "PASS"|"FAIL", "evidence": str}, ...]} -- see invariant_assessment's
