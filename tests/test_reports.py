@@ -79,6 +79,26 @@ def test_ceo_report_summarizes_pass_fail_counts():
     assert "50% compliant" in text
 
 
+def test_technical_report_handles_a_full_size_real_assessment():
+    # Regression test: a table-based layout reliably raised
+    # reportlab.platypus.doctemplate.LayoutError ("too large") once any
+    # single row's remediation text ran long enough to wrap into more
+    # lines than fit on one page -- caught live against a real 199-control
+    # CIS assessment (tamois, 2026-09-13), where several controls' real
+    # remediation text runs past 4000 characters. Short synthetic text
+    # (the other tests in this file) never reproduced it: what broke was
+    # cell height, not row count.
+    long_remediation = "Configure this control as follows. " * 150  # ~5400 chars, matches the worst real case
+    findings = [
+        _finding(external_id=str(i), status="FAIL" if i % 2 else "PASS", remediation=long_remediation)
+        for i in range(199)
+    ]
+
+    pdf_bytes = build_technical_report("tamois", findings)
+
+    assert pdf_bytes.startswith(b"%PDF-")
+
+
 def test_ceo_report_says_no_high_priority_issues_when_none_found():
     findings = [_finding(status="PASS", level=1)]
 

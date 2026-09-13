@@ -86,31 +86,48 @@ def build_ceo_report(title: str, findings: list[Finding]) -> bytes:
     return buf.getvalue()
 
 
+# NOT a table. A real assessment's remediation text runs well past 4000
+# characters on some controls (checked live against tamois's 199-control
+# run) -- squeezed into a ~1.75in table column that wraps into a single
+# row taller than a whole page, which reportlab's Table.split() cannot
+# break (LayoutError: "too large"), no matter how few rows share that
+# table. Free-flowing Paragraphs per finding have no such ceiling: each
+# one splits across a page boundary on its own like any body text.
+_FINDING_HEADER_STYLE = ParagraphStyle("finding_header", parent=_styles["Heading3"], spaceBefore=10, spaceAfter=2)
+_FINDING_META_STYLE = ParagraphStyle("finding_meta", parent=_styles["Normal"], fontSize=8, textColor=colors.grey)
+_FINDING_LABEL_STYLE = ParagraphStyle(
+    "finding_label", parent=_styles["Normal"], fontSize=8, textColor=colors.grey, spaceBefore=6
+)
+_FINDING_BODY_STYLE = ParagraphStyle("finding_body", parent=_styles["Normal"], fontSize=9, leading=12)
+_STATUS_COLOR = {"PASS": "#0f6b3f", "FAIL": "#b91c1c"}
+
+
 def build_technical_report(title: str, findings: list[Finding]) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter, title=f"Invariant — {title} — Technical")
 
     story = _cover(title, "Technical Report — full findings")
-    cell_style = ParagraphStyle("cell", parent=_styles["Normal"], fontSize=8, leading=10)
-    rows = [["ID", "Control", "Status", "Level", "Evidence", "Remediation"]]
     for f in _sorted_by_level(findings):
-        rows.append(
-            [
-                Paragraph(escape(f.external_id), cell_style),
-                Paragraph(escape(f.control_title), cell_style),
-                f.status,
-                str(f.level) if f.level is not None else "-",
-                Paragraph(escape(f.evidence_output), cell_style),
-                Paragraph(escape(f.remediation) if f.remediation else "-", cell_style),
-            ]
+        level_text = f"L{f.level}" if f.level is not None else "—"
+        status_color = _STATUS_COLOR.get(f.status, "#000000")
+        story.append(
+            Paragraph(
+                f'<font color="{status_color}"><b>{escape(f.status)}</b></font> '
+                f"{escape(f.external_id)} — {escape(f.control_title)} ({level_text})",
+                _FINDING_HEADER_STYLE,
+            )
         )
-    table = Table(
-        rows,
-        colWidths=[0.55 * inch, 1.55 * inch, 0.5 * inch, 0.4 * inch, 1.75 * inch, 1.75 * inch],
-        repeatRows=1,
-    )
-    table.setStyle(TableStyle(_TABLE_HEADER_STYLE + [("FONTSIZE", (0, 0), (-1, -1), 8)]))
-    story.append(table)
+        story.append(
+            Paragraph(
+                f"{escape(f.source_name)}/{escape(f.document_name)} v{escape(f.document_version)}",
+                _FINDING_META_STYLE,
+            )
+        )
+        story.append(Paragraph("Evidence", _FINDING_LABEL_STYLE))
+        story.append(Paragraph(escape(f.evidence_output) or "—", _FINDING_BODY_STYLE))
+        if f.remediation:
+            story.append(Paragraph("Remediation", _FINDING_LABEL_STYLE))
+            story.append(Paragraph(escape(f.remediation), _FINDING_BODY_STYLE))
 
     doc.build(story)
     return buf.getvalue()
