@@ -10,7 +10,14 @@ import pytest
 from invariant_contracts import Finding
 from pypdf import PdfReader
 
-from invariant_api.reports import ConsolidatedAsset, build_ceo_report, build_consolidated_report, build_technical_report
+from invariant_api.reports import (
+    ConsolidatedAsset,
+    _bar_fill_width,
+    build_ceo_report,
+    build_consolidated_report,
+    build_technical_report,
+    split_findings,
+)
 
 
 def _finding(**overrides) -> Finding:
@@ -194,6 +201,59 @@ def test_technical_report_separates_not_assessed_from_not_applicable(monkeypatch
     assert "Not Applicable" not in text
 
 
+def test_ssh_control_becomes_not_applicable_when_sshd_confirmed_absent():
+    # (debian_linux_12, 5.1.20) is a real SSHD_DEPENDENT_CONTROLS entry
+    # (PermitRootLogin) -- the default external_id/document_name of the
+    # _finding() fixture already matches it.
+    findings = [_finding(status="FAIL", evidence_output="sshd_config: PermitRootLogin <sshd-not-installed>")]
+
+    _, applicable_fail, _, not_applicable = split_findings(findings)
+
+    assert applicable_fail == []
+    assert not_applicable == findings
+
+
+def test_ssh_control_stays_applicable_when_sshd_state_is_unknown():
+    # UNKNOWN must never hide findings -- only a confirmed ABSENT does.
+    findings = [_finding(status="FAIL", evidence_output="sshd_config: PermitRootLogin <sshd-status-unknown>")]
+
+    _, applicable_fail, _, not_applicable = split_findings(findings)
+
+    assert applicable_fail == findings
+    assert not_applicable == []
+
+
+def test_ssh_control_stays_applicable_when_sshd_is_present():
+    findings = [_finding(status="FAIL", evidence_output="sshd_config: PermitRootLogin yes")]
+
+    _, applicable_fail, _, not_applicable = split_findings(findings)
+
+    assert applicable_fail == findings
+    assert not_applicable == []
+
+
+def test_host_only_and_ssh_dependent_conditions_never_conflict(monkeypatch):
+    # A control that happened to be in both maps (shouldn't exist by
+    # design, but the bucketing must not break if it did) -- the two
+    # conditions are an `or`, so either one alone is sufficient.
+    import invariant_api.finding_taxonomy as taxonomy
+
+    monkeypatch.setattr(taxonomy, "HOST_ONLY_CONTROLS", {("debian_linux_12", "5.1.20")})
+    findings = [_finding(status="FAIL", evidence_output="sshd_config: PermitRootLogin yes")]  # sshd present
+
+    _, _, _, not_applicable = split_findings(findings)
+
+    assert not_applicable == findings  # host-only alone is enough
+
+
+@pytest.mark.parametrize(
+    ("pct", "total_width", "expected"),
+    [(0, 100, 0), (50, 100, 50), (100, 100, 100), (None, 100, 0)],
+)
+def test_bar_fill_width_is_proportional(pct, total_width, expected):
+    assert _bar_fill_width(pct, total_width) == expected
+
+
 def _asset(name: str, findings: list[Finding], status: str = "success", error: str | None = None) -> ConsolidatedAsset:
     return ConsolidatedAsset(name=name, status=status, findings=findings, error=error)
 
@@ -268,3 +328,74 @@ def test_consolidated_compliance_by_asset_uses_the_same_evaluated_formula():
 
     assert "50%" in text  # good: 1 pass / 2 evaluated
     assert "0%" in text  # bad: 0 pass / 1 evaluated
+
+
+def test_consolidated_processed_applicable_not_applicable_close_mathematically(monkeypatch):
+    import invariant_api.finding_taxonomy as taxonomy
+
+    monkeypatch.setattr(taxonomy, "HOST_ONLY_CONTROLS", {("debian_linux_12", "1.4.1")})
+    assets = [
+        _asset(
+            "asset-a",
+            [
+                _finding(external_id="5.1.20", status="PASS"),
+                _finding(external_id="1.4.1", status="FAIL", control_title="Ensure bootloader password is set"),
+                _finding(external_id="9.9.9", status="NOT ASSESSED", control_title="Something unresolved"),
+            ],
+        ),
+        _asset("asset-b", [_finding(external_id="5.1.20", status="FAIL")]),
+    ]
+
+    text = _extract_text(build_consolidated_report(assets))
+
+    assert "Controls processed: 4" in text
+    assert "Applicable controls: 2" in text  # asset-a's PASS + asset-b's FAIL; bootloader and NOT ASSESSED excluded
+    assert "Not Applicable: 1" in text
+    assert "Not Assessed: 1" in text
+
+
+def test_not_applicable_table_shows_effective_status_na_and_preserves_raw_result(monkeypatch):
+    import invariant_api.finding_taxonomy as taxonomy
+
+    monkeypatch.setattr(taxonomy, "HOST_ONLY_CONTROLS", {("debian_linux_12", "1.4.1"), ("debian_linux_12", "1.4.2")})
+    findings = [
+        _finding(external_id="1.4.1", status="PASS", control_title="Ensure bootloader password is set"),
+        _finding(external_id="1.4.2", status="FAIL", control_title="Ensure access to bootloader config is configured"),
+    ]
+
+    text = _extract_text(build_technical_report("tamois", findings))
+
+    assert "Effective Status" in text
+    assert "Raw Result" in text
+    # Both rows show the literal N/A for Effective Status, but keep their
+    # real, different raw results -- collapsing them would make a PASS
+    # indistinguishable from a FAIL in this section.
+    assert text.count("N/A") >= 2
+    assert "PASS" in text
+    assert "FAIL" in text
+
+
+def test_classify_domain_no_longer_leaves_the_previously_other_titles_in_other():
+    # Regression: these 3 real tamois FAILs were classified "Other" before
+    # the Account & Session Management domain was added.
+    from invariant_api.finding_taxonomy import classify_domain
+
+    for title in (
+        "Ensure default user umask is configured",
+        "Ensure accounts without a valid login shell are locked",
+        "Ensure local interactive user home directories are configured",
+    ):
+        assert classify_domain(title) != "Other"
+
+
+def test_why_it_matters_appears_once_per_domain_not_once_per_finding():
+    findings = [
+        _finding(external_id="5.1.20", status="FAIL", control_title="Ensure sshd PermitRootLogin is disabled"),
+        _finding(external_id="5.1.21", status="FAIL", control_title="Ensure sshd PermitUserEnvironment is disabled"),
+        _finding(external_id="5.1.11", status="FAIL", control_title="Ensure sshd IgnoreRhosts is enabled"),
+    ]
+
+    text = _extract_text(build_technical_report("tamois", findings))
+
+    narrative = "Multiple SSH security controls are not explicitly configured."
+    assert text.count(narrative) == 1

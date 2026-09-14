@@ -26,9 +26,15 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Flowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from invariant_api.finding_taxonomy import DOMAIN_NARRATIVE, classify_domain, classify_environment
+from invariant_api.finding_taxonomy import (
+    DOMAIN_NARRATIVE,
+    SSHD_DEPENDENT_CONTROLS,
+    classify_domain,
+    classify_environment,
+    ssh_state,
+)
 
 _styles = getSampleStyleSheet()
 _TABLE_HEADER_STYLE = [
@@ -68,17 +74,23 @@ def split_findings(findings: list[Finding]):
     a third status, but this must not assume it never will); otherwise a
     host-only control is "not applicable" regardless of PASS/FAIL (this
     is what keeps a host-only PASS from inflating compliance just as much
-    as a host-only FAIL would deflate it); otherwise it's a real PASS or
-    FAIL. Returns (applicable_pass, applicable_fail, not_assessed, not_applicable).
+    as a host-only FAIL would deflate it); likewise an SSH-dependent
+    control is "not applicable" when this target's sshd is confirmed
+    ABSENT (never merely UNKNOWN -- see ssh_state()'s docstring; a probe
+    failure of unclear cause must never silently remove real findings);
+    otherwise it's a real PASS or FAIL. Returns (applicable_pass,
+    applicable_fail, not_assessed, not_applicable).
     """
     applicable_pass: list[Finding] = []
     applicable_fail: list[Finding] = []
     not_assessed: list[Finding] = []
     not_applicable: list[Finding] = []
+    state = ssh_state(findings)
     for f in findings:
+        is_ssh_absent = state == "absent" and (f.document_name, f.external_id) in SSHD_DEPENDENT_CONTROLS
         if f.status not in ("PASS", "FAIL"):
             not_assessed.append(f)
-        elif classify_environment(f) == "host_only":
+        elif classify_environment(f) == "host_only" or is_ssh_absent:
             not_applicable.append(f)
         elif f.status == "FAIL":
             applicable_fail.append(f)
@@ -96,11 +108,40 @@ def compliance_pct(applicable_pass: list[Finding], applicable_fail: list[Finding
     return round(100 * len(applicable_pass) / evaluated) if evaluated else None
 
 
-def _progress_bar(pct: int | None, width: int = 20) -> str:
-    if pct is None:
-        return "[" + "░" * width + "] N/A"
-    filled = round(width * pct / 100)
-    return "[" + "█" * filled + "░" * (width - filled) + f"] {pct}%"
+def _bar_fill_width(pct: int | None, total_width: float) -> float:
+    if not pct:
+        return 0.0
+    return total_width * pct / 100
+
+
+class _ComplianceBar(Flowable):
+    """A real filled rectangle, proportional to `pct` -- a text/Unicode
+    bar (the previous approach) renders inconsistently across viewers and
+    visually looked nearly full even at ~56%, since block characters don't
+    subdivide finely and font rendering varies. `pct=None`/`0` draws a
+    fully empty bar, never a filled one (matches "N/A"/"0%" never being
+    conflated with a filled bar).
+    """
+
+    def __init__(self, pct: int | None, width: float = 4 * inch, height: float = 0.22 * inch):
+        super().__init__()
+        self.pct = pct
+        self.width = width
+        self.height = height
+
+    def wrap(self, avail_width, avail_height):
+        return self.width, self.height
+
+    def draw(self):
+        c = self.canv
+        c.setFillColor(colors.HexColor("#e5e7eb"))
+        c.rect(0, 0, self.width, self.height, fill=1, stroke=0)
+        filled = _bar_fill_width(self.pct, self.width)
+        if filled:
+            c.setFillColor(colors.HexColor("#1d2b4f"))
+            c.rect(0, 0, filled, self.height, fill=1, stroke=0)
+        c.setStrokeColor(colors.grey)
+        c.rect(0, 0, self.width, self.height, fill=0, stroke=1)
 
 
 def _summary_line(applicable_pass, applicable_fail, not_assessed, not_applicable, total: int, pct_text: str) -> str:
@@ -119,7 +160,6 @@ def build_ceo_report(title: str, findings: list[Finding]) -> bytes:
     applicable_pass, applicable_fail, not_assessed, not_applicable = split_findings(findings)
     pct = compliance_pct(applicable_pass, applicable_fail)
     pct_text = "N/A" if pct is None else f"{pct}%"
-    bar_style = ParagraphStyle("bar", parent=_styles["Normal"], fontName="Courier")
 
     story = _cover(title, "Executive Summary")
     story.append(
@@ -129,7 +169,12 @@ def build_ceo_report(title: str, findings: list[Finding]) -> bytes:
         )
     )
     story.append(Spacer(1, 0.1 * inch))
-    story.append(Paragraph(_progress_bar(pct), bar_style))
+    bar_row = Table(
+        [[_ComplianceBar(pct), Paragraph(f"{pct_text} compliant", _styles["Normal"])]],
+        colWidths=[4.2 * inch, 2 * inch],
+    )
+    bar_row.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+    story.append(bar_row)
     story.append(Spacer(1, 0.3 * inch))
 
     level1 = [f for f in applicable_fail if f.level == 1]
@@ -216,7 +261,6 @@ def _append_finding_detail(story: list, f: Finding) -> None:
     if f.remediation:
         story.append(Paragraph("Remediation", _FINDING_LABEL_STYLE))
         story.append(Paragraph(escape(f.remediation), _FINDING_BODY_STYLE))
-    story.append(Paragraph(escape(DOMAIN_NARRATIVE.get(domain, DOMAIN_NARRATIVE["Other"])), _FINDING_WHY_STYLE))
 
 
 def _compact_control_table(findings: list[Finding], extra_col: str | None = None) -> Table:
@@ -232,6 +276,21 @@ def _compact_control_table(findings: list[Finding], extra_col: str | None = None
         rows.append(row)
     col_widths = [0.8 * inch, 5.5 * inch] if not extra_col else [0.7 * inch, 4.9 * inch, 0.7 * inch]
     table = Table(rows, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle(_TABLE_HEADER_STYLE))
+    return table
+
+
+def _not_applicable_table(findings: list[Finding]) -> Table:
+    """Not Applicable is never a raw PASS/FAIL outcome -- every row here
+    was excluded from compliance, so "Effective Status" is always the
+    literal "N/A"; "Raw Result" keeps the underlying PASS/FAIL only for
+    auditability (so a reader can tell the check genuinely ran, it just
+    didn't count).
+    """
+    rows = [["ID", "Control", "Effective Status", "Raw Result"]]
+    for f in _sorted_by_level(findings):
+        rows.append([f.external_id, f.control_title, "N/A", f.status])
+    table = Table(rows, colWidths=[0.7 * inch, 4.3 * inch, 1.0 * inch, 0.8 * inch], repeatRows=1)
     table.setStyle(TableStyle(_TABLE_HEADER_STYLE))
     return table
 
@@ -271,9 +330,21 @@ def build_consolidated_report(assets: list[ConsolidatedAsset]) -> bytes:
         names = ", ".join(escape(a.name) for a in errored)
         story.append(Paragraph(f"Failed to assess: {names}", _styles["Normal"]))
 
-    total_controls = sum(len(a.findings) for a in succeeded)
+    # Computed once per asset, reused below for both the overview totals
+    # and Compliance by Asset -- split_findings is the single source of
+    # truth for what counts as processed/applicable/not-applicable.
+    per_asset = [(a.name, split_findings(a.findings)) for a in succeeded]
+
+    processed = sum(len(a.findings) for a in succeeded)
+    applicable_total = sum(len(ap) + len(af) for _, (ap, af, _, _) in per_asset)
+    not_applicable_total = sum(len(na) for _, (_, _, _, na) in per_asset)
+    not_assessed_total = sum(len(nas) for _, (_, _, nas, _) in per_asset)
     benchmarks = sorted({f"{f.document_name} v{f.document_version}" for a in succeeded for f in a.findings})
-    story.append(Paragraph(f"Total controls evaluated: {total_controls}", _styles["Normal"]))
+    story.append(Paragraph(f"Controls processed: {processed}", _styles["Normal"]))
+    story.append(Paragraph(f"Applicable controls: {applicable_total}", _styles["Normal"]))
+    story.append(Paragraph(f"Not Applicable: {not_applicable_total}", _styles["Normal"]))
+    if not_assessed_total:
+        story.append(Paragraph(f"Not Assessed: {not_assessed_total}", _styles["Normal"]))
     if benchmarks:
         story.append(Paragraph(f"Benchmarks: {escape(', '.join(benchmarks))}", _styles["Normal"]))
     story.append(Spacer(1, 0.3 * inch))
@@ -283,10 +354,7 @@ def build_consolidated_report(assets: list[ConsolidatedAsset]) -> bytes:
         return buf.getvalue()
 
     story.append(Paragraph("Compliance by Asset", _styles["Heading2"]))
-    asset_pct = []
-    for a in succeeded:
-        applicable_pass, applicable_fail, _, _ = split_findings(a.findings)
-        asset_pct.append((a.name, compliance_pct(applicable_pass, applicable_fail)))
+    asset_pct = [(name, compliance_pct(ap, af)) for name, (ap, af, _, _) in per_asset]
     # Worst first; assets with nothing applicable evaluated (N/A) go last
     # -- they're not "bad", there's just nothing to rank.
     asset_pct.sort(key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0))
@@ -329,10 +397,9 @@ def build_consolidated_report(assets: list[ConsolidatedAsset]) -> bytes:
         story.append(Spacer(1, 0.3 * inch))
 
     domain_assets: dict[str, set[str]] = defaultdict(set)
-    for a in succeeded:
-        _, applicable_fail, _, _ = split_findings(a.findings)
-        for f in applicable_fail:
-            domain_assets[classify_domain(f.control_title)].add(a.name)
+    for name, (_, af, _, _) in per_asset:
+        for f in af:
+            domain_assets[classify_domain(f.control_title)].add(name)
     domain_counts = sorted(domain_assets.items(), key=lambda item: -len(item[1]))
 
     if domain_counts:
@@ -393,6 +460,10 @@ def build_technical_report(title: str, findings: list[Finding]) -> bytes:
         story.append(Paragraph(f"Failed Controls ({len(applicable_fail)})", _styles["Heading2"]))
         for domain in sorted({classify_domain(f.control_title) for f in applicable_fail}):
             group = [f for f in applicable_fail if classify_domain(f.control_title) == domain]
+            story.append(Paragraph(escape(domain), _styles["Heading3"]))
+            story.append(
+                Paragraph(escape(DOMAIN_NARRATIVE.get(domain, DOMAIN_NARRATIVE["Other"])), _FINDING_WHY_STYLE)
+            )
             for f in _sorted_by_level(group):
                 _append_finding_detail(story, f)
         story.append(Spacer(1, 0.2 * inch))
@@ -415,7 +486,7 @@ def build_technical_report(title: str, findings: list[Finding]) -> bytes:
                 _styles["Normal"],
             )
         )
-        story.append(_compact_control_table(not_applicable, extra_col="Status"))
+        story.append(_not_applicable_table(not_applicable))
         story.append(Spacer(1, 0.2 * inch))
 
     if applicable_pass:
