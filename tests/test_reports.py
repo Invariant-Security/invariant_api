@@ -306,6 +306,21 @@ def test_consolidated_prevalence_excludes_host_only_findings(monkeypatch):
     assert "bootloader" not in text.lower()  # host-only, never counted as a prevalent failure
 
 
+def test_consolidated_prevalence_excludes_ssh_findings_when_sshd_absent():
+    # Regression: an earlier version of this function re-derived
+    # applicability from classify_environment() alone instead of reusing
+    # split_findings, which missed the per-run SSH-absent case entirely --
+    # caught live against a real 4-container batch where every container
+    # showed sshd absent, yet "Ensure sshd PermitRootLogin is disabled"
+    # still appeared as a 4/4 prevalent failure.
+    findings = [_finding(status="FAIL", evidence_output="sshd_config: PermitRootLogin <sshd-not-installed>")]
+    assets = [_asset("asset-a", findings), _asset("asset-b", findings)]
+
+    text = _extract_text(build_consolidated_report(assets))
+
+    assert "PermitRootLogin" not in text
+
+
 def test_consolidated_domain_names_are_not_double_escaped():
     # Regression: plain Table cells (unlike Paragraph) never parse markup,
     # so xml.sax.saxutils.escape()'ing a domain name like "Authentication

@@ -372,17 +372,24 @@ def build_consolidated_report(assets: list[ConsolidatedAsset]) -> bytes:
     # this control was actually evaluated and applicable", never the raw
     # asset count, since a mixed-OS batch won't have every control apply
     # to every asset.
+    # Grouping only applicable_pass/applicable_fail (already computed by
+    # split_findings, same source of truth Compliance by Asset above uses)
+    # -- not a second, independent applicability check -- is what makes
+    # this automatically respect both host-only *and* a per-target SSH-
+    # absent verdict. Re-deriving applicability here from classify_
+    # environment() alone (an earlier version of this function did) missed
+    # the SSH case entirely, since that's a per-run signal split_findings
+    # already resolved, not a static per-control fact.
     by_title: dict[str, list[Finding]] = defaultdict(list)
-    for a in succeeded:
-        for f in a.findings:
+    for _, (ap, af, _, _) in per_asset:
+        for f in ap + af:
             by_title[f.control_title].append(f)
 
     prevalence = []
     for title, group in by_title.items():
-        applicable = [f for f in group if f.status in ("PASS", "FAIL") and classify_environment(f) == "container_relevant"]
-        affected = [f for f in applicable if f.status == "FAIL"]
-        if applicable and affected:
-            prevalence.append((title, len(affected), len(applicable)))
+        affected = [f for f in group if f.status == "FAIL"]
+        if affected:
+            prevalence.append((title, len(affected), len(group)))
     prevalence.sort(key=lambda item: -item[1])
 
     if prevalence:
