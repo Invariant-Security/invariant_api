@@ -112,6 +112,26 @@ def endpoint_results(endpoint_id: int) -> list[DiscoveryResult]:
     ]
 
 
+def _resolve_target_ip(conn, endpoint_id: int) -> tuple[dict, str]:
+    """Shared by /check and /assess: looks up the endpoint and the IP to
+    actually connect to. A CIDR endpoint expands to multiple
+    discovery_results rows (one per IP) -- both routes act on exactly one
+    host per call, deterministically the first discovered row (per-IP
+    action across a whole CIDR range is future work, not this phase's
+    scope).
+    """
+    endpoint = db.select_endpoint_by_id(conn, id=endpoint_id)
+    if endpoint is None:
+        raise HTTPException(404, f"endpoint {endpoint_id} not found")
+    discovery_rows = db.select_latest_discovery_results_by_endpoint(conn, endpoint_id=endpoint_id)
+    if not discovery_rows:
+        raise HTTPException(
+            422,
+            f"endpoint {endpoint_id} has no discovery results yet -- run POST /endpoints/{endpoint_id}/discover first",
+        )
+    return endpoint, discovery_rows[0]["ip"]
+
+
 class SSHCredentials(BaseModel):
     """Request body for POST /endpoints/{id}/assess. Ephemeral,
     request-scoped only -- used once to build this request's
@@ -139,23 +159,8 @@ def assess_discovered_endpoint(endpoint_id: int, credentials: SSHCredentials) ->
     enough to pick a specific CIS document/family.
     """
     conn = db.connect()
-    endpoint = db.select_endpoint_by_id(conn, id=endpoint_id)
-    if endpoint is None:
-        conn.close()
-        raise HTTPException(404, f"endpoint {endpoint_id} not found")
-
-    discovery_rows = db.select_latest_discovery_results_by_endpoint(conn, endpoint_id=endpoint_id)
+    endpoint, target_ip = _resolve_target_ip(conn, endpoint_id)
     conn.close()
-    if not discovery_rows:
-        raise HTTPException(
-            422,
-            f"endpoint {endpoint_id} has no discovery results yet -- run POST /endpoints/{endpoint_id}/discover first",
-        )
-    # A CIDR endpoint expands to multiple discovery_results rows (one per
-    # IP) -- this route assesses exactly one host per call, deterministically
-    # the first discovered row. Per-IP assessment across a whole CIDR range
-    # is future work, not this phase's scope.
-    target_ip = discovery_rows[0]["ip"]
 
     try:
         run = assessment_client.run_assessment_remote(
@@ -169,4 +174,30 @@ def assess_discovered_endpoint(endpoint_id: int, credentials: SSHCredentials) ->
     except httpx.HTTPStatusError as e:
         raise HTTPException(e.response.status_code, e.response.text) from e
 
-    return _findings_from_run(endpoint["address"], run)
+    return _findings_from_run(endpoint["address"], run, target_type="linux_host")
+
+
+@router.post("/{endpoint_id}/check")
+def check_endpoint(endpoint_id: int, credentials: SSHCredentials) -> dict:
+    """Cheap pre-flight for POST /{endpoint_id}/assess -- same idea as
+    GET /containers/{name}/check, but for an SSH-reached Linux host:
+    identifies target_type/hostname/OS/primary IP before committing to a
+    real assessment run. `primary_ip` is the endpoint's own stored
+    address -- never asked of invariant_assessment, since invariant_api
+    already owns that data.
+    """
+    conn = db.connect()
+    endpoint, target_ip = _resolve_target_ip(conn, endpoint_id)
+    conn.close()
+    try:
+        result = assessment_client.check_remote(
+            host=target_ip,
+            port=credentials.port,
+            username=credentials.username,
+            auth_method=credentials.auth_method,
+            key_material=credentials.key_material,
+            password=credentials.password,
+        )
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(e.response.status_code, e.response.text) from e
+    return {**result, "target_type": "linux_host", "primary_ip": endpoint["address"]}

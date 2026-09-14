@@ -29,13 +29,16 @@ def _control_level(normalized_data: dict) -> int | None:
     return min(levels) if levels else None
 
 
-def _findings_from_run(target_label: str, run: dict) -> list[Finding]:
+def _findings_from_run(target_label: str, run: dict, target_type: str) -> list[Finding]:
     """Turns invariant_assessment's {document, results: [...]}  response
     into real Findings by joining each result against Postgres control
     metadata by title. Shared by both the docker-exec assess route
     (assess()) and the SSH-based endpoints.assess_discovered_endpoint()
     route -- same join, different caller/target_label/assessment_client
-    function used to produce `run`.
+    function used to produce `run`. `target_type` is decided by the caller
+    (which route/transport was used), never inferred here -- feeds
+    finding_taxonomy's applicability logic (HOST_ONLY_CONTROLS only
+    applies to docker_container, never a real linux_host).
     """
     conn = db.connect()
     collected_at = datetime.now(timezone.utc).isoformat()
@@ -64,6 +67,7 @@ def _findings_from_run(target_label: str, run: dict) -> list[Finding]:
                 document_retrieved_at=(
                     control["retrieved_at"].isoformat() if control["retrieved_at"] else ""
                 ),
+                target_type=target_type,
             )
         )
     conn.close()
@@ -76,7 +80,7 @@ def assess(target: str) -> list[Finding]:
         run = assessment_client.run_assessment(target)
     except httpx.HTTPStatusError as e:
         raise HTTPException(e.response.status_code, e.response.text) from e
-    return _findings_from_run(target, run)
+    return _findings_from_run(target, run, target_type="docker_container")
 
 
 @router.get("/containers")
@@ -102,6 +106,7 @@ def check_container(name: str, response: Response) -> dict:
     """
     response.headers["Cache-Control"] = "no-store"
     try:
-        return assessment_client.check_target(name)
+        result = assessment_client.check_target(name)
     except httpx.HTTPStatusError as e:
         raise HTTPException(e.response.status_code, e.response.text) from e
+    return {**result, "target_type": "docker_container", "primary_ip": None}

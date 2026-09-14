@@ -26,6 +26,13 @@ class ReportRequest(BaseModel):
     kind: Literal["ceo", "technical", "consolidated"]
     findings: list[Finding] = []
     assets: list[AssetPayload] = []
+    # Cosmetic-only, never affects compliance -- feeds the cover's target
+    # label. Ignored entirely for kind="consolidated" (no single target)
+    # and ignored for hostname/primary_ip when the findings' own
+    # target_type is docker_container (see reports._format_target_label).
+    hostname: str | None = None
+    primary_ip: str | None = None
+    container_image: str | None = None
 
 
 @router.post("/reports/pdf")
@@ -36,7 +43,7 @@ def generate_report(payload: ReportRequest) -> Response:
         )
     else:
         builder = build_ceo_report if payload.kind == "ceo" else build_technical_report
-        pdf_bytes = builder(payload.title, payload.findings)
+        pdf_bytes = builder(payload.title, payload.findings, payload.hostname, payload.primary_ip, payload.container_image)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

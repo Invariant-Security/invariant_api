@@ -57,14 +57,68 @@ def _sorted_by_level(findings: list[Finding]) -> list[Finding]:
     return sorted(findings, key=lambda f: f.level if f.level is not None else 99)
 
 
-def _cover(title: str, subtitle: str) -> list:
-    return [
+def _format_os_display(document_name: str) -> str:
+    """Deterministic parse, not free-text heuristics -- document_name is
+    an internal identifier this project controls, always shaped
+    "{distro}_linux_{version}" (e.g. "debian_linux_12",
+    "ubuntu_linux_24_04"). Never guesses; an unrecognized shape just
+    falls back to the raw string rather than raising.
+    """
+    if "_linux_" not in document_name:
+        return document_name
+    distro, _, version = document_name.partition("_linux_")
+    return f"{distro.capitalize()} {version.replace('_', '.')}"
+
+
+def _format_target_label(
+    target_type: str,
+    document_name: str,
+    hostname: str | None = None,
+    primary_ip: str | None = None,
+    container_image: str | None = None,
+) -> str:
+    """Builds the one-line target identity shown on every report cover --
+    "Linux host · Debian 13 · 10.0.0.25" or "Docker container · Debian
+    13" or "Docker container · PostgreSQL 16 · Debian 12". hostname/
+    primary_ip are deliberately ignored for docker_container even if a
+    caller passes them by mistake -- IP/hostname are never a container
+    concept in this design, so this is the one place that guarantees they
+    can't leak onto a container's report regardless of what the request
+    body contained.
+    """
+    kind = "Linux host" if target_type == "linux_host" else "Docker container"
+    parts = [kind]
+    if container_image:
+        parts.append(container_image)
+    os_display = _format_os_display(document_name) if document_name else None
+    if os_display:
+        parts.append(os_display)
+    if target_type == "linux_host":
+        parts.append(primary_ip or "Unknown")
+    return " · ".join(parts)
+
+
+def _cover(
+    title: str,
+    subtitle: str,
+    findings: list[Finding] | None = None,
+    hostname: str | None = None,
+    primary_ip: str | None = None,
+    container_image: str | None = None,
+) -> list:
+    story = [
         Paragraph("Invariant Security Assessment", _styles["Title"]),
         Paragraph(escape(title), _styles["Heading2"]),
         Paragraph(escape(subtitle), _styles["Normal"]),
         Paragraph(datetime.now(timezone.utc).strftime("%Y-%m-%d"), _styles["Normal"]),
-        Spacer(1, 0.3 * inch),
     ]
+    if findings:
+        label = _format_target_label(
+            findings[0].target_type, findings[0].document_name, hostname, primary_ip, container_image
+        )
+        story.append(Paragraph(escape(label), _styles["Normal"]))
+    story.append(Spacer(1, 0.3 * inch))
+    return story
 
 
 def split_findings(findings: list[Finding]):
@@ -72,25 +126,31 @@ def split_findings(findings: list[Finding]):
     this priority order: a status outside PASS/FAIL always means "not
     assessed" regardless of environment (today's pipeline never produces
     a third status, but this must not assume it never will); otherwise a
-    host-only control is "not applicable" regardless of PASS/FAIL (this
-    is what keeps a host-only PASS from inflating compliance just as much
-    as a host-only FAIL would deflate it); likewise an SSH-dependent
-    control is "not applicable" when this target's sshd is confirmed
-    ABSENT (never merely UNKNOWN -- see ssh_state()'s docstring; a probe
-    failure of unclear cause must never silently remove real findings);
-    otherwise it's a real PASS or FAIL. Returns (applicable_pass,
-    applicable_fail, not_assessed, not_applicable).
+    host-only control is "not applicable" -- but ONLY for a
+    docker_container target: HOST_ONLY_CONTROLS means "not applicable to
+    the container context", not "globally irrelevant" -- a real Linux
+    host (target_type="linux_host") must be judged on GRUB/auditd/
+    journald/cron/partitions normally, the same as any other control.
+    Likewise an SSH-dependent control is "not applicable" when this
+    target's sshd is confirmed ABSENT (never merely UNKNOWN -- see
+    ssh_state()'s docstring; a probe failure of unclear cause must never
+    silently remove real findings) -- this check IS unconditional on
+    target_type, since "is sshd installed" is a real question for a host
+    too, not a container-only concept. Otherwise it's a real PASS or FAIL.
+    Returns (applicable_pass, applicable_fail, not_assessed, not_applicable).
     """
     applicable_pass: list[Finding] = []
     applicable_fail: list[Finding] = []
     not_assessed: list[Finding] = []
     not_applicable: list[Finding] = []
     state = ssh_state(findings)
+    target_type = findings[0].target_type if findings else "docker_container"
     for f in findings:
         is_ssh_absent = state == "absent" and (f.document_name, f.external_id) in SSHD_DEPENDENT_CONTROLS
+        is_host_only_for_container = target_type == "docker_container" and classify_environment(f) == "host_only"
         if f.status not in ("PASS", "FAIL"):
             not_assessed.append(f)
-        elif classify_environment(f) == "host_only" or is_ssh_absent:
+        elif is_host_only_for_container or is_ssh_absent:
             not_applicable.append(f)
         elif f.status == "FAIL":
             applicable_fail.append(f)
@@ -153,7 +213,13 @@ def _summary_line(applicable_pass, applicable_fail, not_assessed, not_applicable
     return f"{total} controls evaluated against CIS benchmarks. {pct_text} compliant ({parts})."
 
 
-def build_ceo_report(title: str, findings: list[Finding]) -> bytes:
+def build_ceo_report(
+    title: str,
+    findings: list[Finding],
+    hostname: str | None = None,
+    primary_ip: str | None = None,
+    container_image: str | None = None,
+) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter, title=f"Invariant — {title}")
 
@@ -161,7 +227,7 @@ def build_ceo_report(title: str, findings: list[Finding]) -> bytes:
     pct = compliance_pct(applicable_pass, applicable_fail)
     pct_text = "N/A" if pct is None else f"{pct}%"
 
-    story = _cover(title, "Executive Summary")
+    story = _cover(title, "Executive Summary", findings, hostname, primary_ip, container_image)
     story.append(
         Paragraph(
             _summary_line(applicable_pass, applicable_fail, not_assessed, not_applicable, len(findings), pct_text),
@@ -429,7 +495,13 @@ def build_consolidated_report(assets: list[ConsolidatedAsset]) -> bytes:
     return buf.getvalue()
 
 
-def build_technical_report(title: str, findings: list[Finding]) -> bytes:
+def build_technical_report(
+    title: str,
+    findings: list[Finding],
+    hostname: str | None = None,
+    primary_ip: str | None = None,
+    container_image: str | None = None,
+) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter, title=f"Invariant — {title} — Technical")
 
@@ -437,7 +509,7 @@ def build_technical_report(title: str, findings: list[Finding]) -> bytes:
     pct = compliance_pct(applicable_pass, applicable_fail)
     pct_text = "N/A" if pct is None else f"{pct}%"
 
-    story = _cover(title, "Technical Report — full findings")
+    story = _cover(title, "Technical Report — full findings", findings, hostname, primary_ip, container_image)
 
     story.append(Paragraph("Assessment Summary", _styles["Heading2"]))
     story.append(

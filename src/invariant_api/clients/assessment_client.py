@@ -43,6 +43,35 @@ def run_assessment(target: str) -> dict:
     return resp.json()
 
 
+def check_remote(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    auth_method: str,
+    key_material: str | None = None,
+    password: str | None = None,
+) -> dict:
+    """SSH twin of check_target() -- same cheap pre-flight, reached over
+    SSH instead of docker exec. See invariant_assessment's api.py for the
+    exact response_model (CheckResponse, now including `hostname`).
+    """
+    resp = httpx.post(
+        f"{BASE_URL}/assessment/check-remote",
+        json={
+            "host": host,
+            "port": port,
+            "username": username,
+            "auth_method": auth_method,
+            "key_material": key_material,
+            "password": password,
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def run_assessment_remote(
     *,
     host: str,

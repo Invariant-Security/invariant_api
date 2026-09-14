@@ -144,6 +144,89 @@ def test_ceo_report_never_recreates_the_cis_level_as_severity_conflation():
     assert "CIS Level 2 failures" in text
 
 
+def test_host_only_control_stays_applicable_for_a_real_linux_host(monkeypatch):
+    # The central bug this feature fixes: HOST_ONLY_CONTROLS means "not
+    # applicable to the container context", not "globally irrelevant" --
+    # a real Linux host must be judged on these controls normally.
+    import invariant_api.finding_taxonomy as taxonomy
+
+    monkeypatch.setattr(taxonomy, "HOST_ONLY_CONTROLS", {("debian_linux_12", "1.4.1")})
+    findings = [_finding(external_id="1.4.1", status="FAIL", target_type="linux_host")]
+
+    applicable_pass, applicable_fail, not_assessed, not_applicable = split_findings(findings)
+
+    assert applicable_fail == findings
+    assert not_applicable == []
+
+
+def test_host_only_control_becomes_not_applicable_for_a_docker_container(monkeypatch):
+    import invariant_api.finding_taxonomy as taxonomy
+
+    monkeypatch.setattr(taxonomy, "HOST_ONLY_CONTROLS", {("debian_linux_12", "1.4.1")})
+    findings = [_finding(external_id="1.4.1", status="FAIL", target_type="docker_container")]
+
+    applicable_pass, applicable_fail, not_assessed, not_applicable = split_findings(findings)
+
+    assert applicable_fail == []
+    assert not_applicable == findings
+
+
+def test_ssh_conditional_applicability_unaffected_by_target_type():
+    # ssh_state/SSHD_DEPENDENT_CONTROLS is not a "container-only" rule --
+    # "is sshd installed" is a real question for a host too.
+    for target_type in ("linux_host", "docker_container"):
+        findings = [
+            _finding(
+                status="FAIL",
+                evidence_output="sshd_config: PermitRootLogin <sshd-not-installed>",
+                target_type=target_type,
+            )
+        ]
+        _, applicable_fail, _, not_applicable = split_findings(findings)
+        assert applicable_fail == []
+        assert not_applicable == findings
+
+
+def test_ceo_report_shows_linux_host_label_with_ip():
+    findings = [_finding(status="FAIL", target_type="linux_host", document_name="debian_linux_13")]
+
+    text = _extract_text(build_ceo_report("invariant-demo-linux", findings, primary_ip="10.153.120.185"))
+
+    assert "Linux host" in text
+    assert "Debian 13" in text
+    assert "10.153.120.185" in text
+
+
+def test_ceo_report_shows_docker_container_label_without_ip():
+    findings = [_finding(status="FAIL", target_type="docker_container", document_name="debian_linux_12")]
+
+    text = _extract_text(build_ceo_report("liliankaliaki", findings))
+
+    assert "Docker container" in text
+    assert "Debian 12" in text
+
+
+def test_docker_container_report_never_leaks_hostname_or_ip_even_if_passed():
+    # Belt-and-suspenders: _format_target_label ignores hostname/primary_ip
+    # for docker_container regardless of what the caller sent.
+    findings = [_finding(status="FAIL", target_type="docker_container", document_name="debian_linux_12")]
+
+    text = _extract_text(
+        build_ceo_report("liliankaliaki", findings, hostname="should-not-appear", primary_ip="9.9.9.9")
+    )
+
+    assert "should-not-appear" not in text
+    assert "9.9.9.9" not in text
+
+
+def test_linux_host_report_shows_unknown_ip_when_not_provided():
+    findings = [_finding(status="FAIL", target_type="linux_host", document_name="debian_linux_13")]
+
+    text = _extract_text(build_ceo_report("invariant-demo-linux", findings))
+
+    assert "Unknown" in text
+
+
 def test_host_only_pass_does_not_inflate_compliance(monkeypatch):
     # Round-1 correction: a host-only control that happens to PASS must
     # not count toward compliance any more than a host-only FAIL would

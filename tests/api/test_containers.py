@@ -53,7 +53,10 @@ def test_check_container_proxies_check_target(monkeypatch):
     response = client.get("/containers/tamois/check")
 
     assert response.status_code == 200
-    assert response.json()["testable"] is True
+    body = response.json()
+    assert body["testable"] is True
+    assert body["target_type"] == "docker_container"
+    assert body["primary_ip"] is None  # never invented for a container
     assert response.headers["cache-control"] == "no-store"
 
 

@@ -234,6 +234,7 @@ def test_assess_discovered_endpoint_calls_assessment_client_with_ip_and_credenti
     assert captured["username"] == "root"
     assert captured["auth_method"] == "password"
     assert captured["password"] == "hunter2"
+    assert body[0]["target_type"] == "linux_host"
 
 
 def test_assess_discovered_endpoint_propagates_assessment_service_error(session_client, monkeypatch):
@@ -260,6 +261,83 @@ def test_assess_discovered_endpoint_requires_auth():
 
     response = anonymous.post(
         "/endpoints/1/assess",
+        json={"username": "root", "auth_method": "password", "password": "hunter2"},
+    )
+
+    assert response.status_code == 401
+
+
+# --- POST /endpoints/{id}/check (SSH pre-flight, mirrors GET /containers/{name}/check) ---
+
+
+def test_check_endpoint_requires_discovery_first(session_client):
+    endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
+
+    response = session_client.post(
+        f"/endpoints/{endpoint_id}/check",
+        json={"username": "root", "auth_method": "password", "password": "hunter2"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_check_endpoint_returns_target_type_and_primary_ip(session_client, monkeypatch):
+    endpoint_id = session_client.post(
+        "/endpoints", json={"address": "10.0.0.5", "label": "invariant-demo-linux"}
+    ).json()["id"]
+    _discover_endpoint(session_client, monkeypatch, endpoint_id)
+
+    monkeypatch.setattr(
+        assessment_client,
+        "check_remote",
+        lambda **kwargs: {
+            "testable": True,
+            "os_id": "debian",
+            "os_version_id": "13",
+            "family": "debian_ubuntu",
+            "reason_code": None,
+            "reason": None,
+            "hostname": "invariant-demo-linux",
+        },
+    )
+
+    response = session_client.post(
+        f"/endpoints/{endpoint_id}/check",
+        json={"username": "root", "auth_method": "password", "password": "hunter2"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["testable"] is True
+    assert body["target_type"] == "linux_host"
+    assert body["primary_ip"] == "10.0.0.5"  # the endpoint's own stored address, not the discovery ip
+    assert body["hostname"] == "invariant-demo-linux"
+
+
+def test_check_endpoint_propagates_assessment_service_error(session_client, monkeypatch):
+    endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
+    _discover_endpoint(session_client, monkeypatch, endpoint_id)
+
+    def boom(**kwargs):
+        request = httpx.Request("POST", "http://assessment:8000/assessment/check-remote")
+        response = httpx.Response(401, request=request, text="bad SSH credentials")
+        raise httpx.HTTPStatusError("401", request=request, response=response)
+
+    monkeypatch.setattr(assessment_client, "check_remote", boom)
+
+    response = session_client.post(
+        f"/endpoints/{endpoint_id}/check",
+        json={"username": "root", "auth_method": "password", "password": "wrong"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_check_endpoint_requires_auth():
+    anonymous = TestClient(main.app)
+
+    response = anonymous.post(
+        "/endpoints/1/check",
         json={"username": "root", "auth_method": "password", "password": "hunter2"},
     )
 
