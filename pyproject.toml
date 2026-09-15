@@ -11,10 +11,11 @@ dependencies = [
     "psycopg[binary]",
     "alembic",
     "mercadopago",
+    "reportlab",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "httpx2"]
+dev = ["pytest", "pytest-cov", "httpx2", "pypdf"]
 
 [tool.pytest.ini_options]
 markers = [

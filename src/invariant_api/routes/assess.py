@@ -10,7 +10,7 @@ an HTTP call instead of iterating CHECKS/facts directly).
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from invariant_contracts import Finding
 
 from invariant_api.clients import assessment_client
@@ -29,13 +29,17 @@ def _control_level(normalized_data: dict) -> int | None:
     return min(levels) if levels else None
 
 
-@router.post("/assess/{target}", response_model=list[Finding])
-def assess(target: str) -> list[Finding]:
-    try:
-        run = assessment_client.run_assessment(target)
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(e.response.status_code, e.response.text) from e
-
+def _findings_from_run(target_label: str, run: dict, target_type: str) -> list[Finding]:
+    """Turns invariant_assessment's {document, results: [...]}  response
+    into real Findings by joining each result against Postgres control
+    metadata by title. Shared by both the docker-exec assess route
+    (assess()) and the SSH-based endpoints.assess_discovered_endpoint()
+    route -- same join, different caller/target_label/assessment_client
+    function used to produce `run`. `target_type` is decided by the caller
+    (which route/transport was used), never inferred here -- feeds
+    finding_taxonomy's applicability logic (HOST_ONLY_CONTROLS only
+    applies to docker_container, never a real linux_host).
+    """
     conn = db.connect()
     collected_at = datetime.now(timezone.utc).isoformat()
     findings = []
@@ -46,7 +50,7 @@ def assess(target: str) -> list[Finding]:
             raise HTTPException(422, f"none of {result['titles']!r} found for document {run['document']!r}")
         findings.append(
             Finding(
-                target=target,
+                target=target_label,
                 external_id=control["external_id"],
                 status=result["status"],
                 control_title=control["title"],
@@ -63,7 +67,46 @@ def assess(target: str) -> list[Finding]:
                 document_retrieved_at=(
                     control["retrieved_at"].isoformat() if control["retrieved_at"] else ""
                 ),
+                target_type=target_type,
             )
         )
     conn.close()
     return findings
+
+
+@router.post("/assess/{target}", response_model=list[Finding])
+def assess(target: str) -> list[Finding]:
+    try:
+        run = assessment_client.run_assessment(target)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(e.response.status_code, e.response.text) from e
+    return _findings_from_run(target, run, target_type="docker_container")
+
+
+@router.get("/containers")
+def list_containers() -> list[dict]:
+    """Candidates for POST /assess/{target} -- every container on this
+    host, minus invariant's own stack (appliance/demo/infra, not a client
+    asset -- the "invariant-" prefix is a naming convention this project
+    controls, not a guess). No auth, same intentional decision as the
+    rest of this module for this phase of the project.
+    """
+    containers = assessment_client.list_containers()
+    return [c for c in containers if not c["name"].startswith("invariant-")]
+
+
+@router.get("/containers/{name}/check")
+def check_container(name: str, response: Response) -> dict:
+    """Cheap pre-flight for POST /assess/{name} -- detects OS, checks it
+    against the same family_for_os() gate assess() itself hits, but never
+    runs the 199 CHECKS. GET is semantically fine here (a read of the
+    container's current, discoverable state), but that state can change
+    if the container gets recreated under the same name -- no-store keeps
+    an intermediary from serving a stale answer.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        result = assessment_client.check_target(name)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(e.response.status_code, e.response.text) from e
+    return {**result, "target_type": "docker_container", "primary_ip": None}

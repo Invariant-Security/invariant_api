@@ -1,0 +1,33 @@
+# Net-new capacidade de CI (não é o padrão de deploy.yml/deploy-dev.yml
+# existente, que faz `git reset --hard` + build local direto na VPS) --
+# publica a imagem versionada em ghcr.io que
+# docker-compose.appliance.yml referencia via `image:`. O instalador .deb
+# (invariant_packaging/) nunca builda nada na máquina do cliente, só
+# puxa a tag já publicada aqui.
+name: publish-image
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/invariant-security/invariant-api:${{ github.ref_name }}
+            ghcr.io/invariant-security/invariant-api:latest

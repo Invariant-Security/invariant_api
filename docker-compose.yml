@@ -63,6 +63,18 @@ services:
       timeout: 5s
       retries: 3
 
+  discovery:
+    build:
+      context: ../invariant_discovery
+    # Sondagem pura de rede (asyncio/socket/TLS) -- sem docker.sock, sem
+    # nenhum mount, diferente de assessment (docker exec no host).
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   api:
     build:
       context: .
@@ -71,12 +83,20 @@ services:
       DATABASE_URL: postgresql://invariant:invariant@postgres:5432/invariant
       INVARIANT_ASSESSMENT_URL: http://assessment:8000
       INVARIANT_INGESTION_URL: http://ingestion:8000
+      INVARIANT_DISCOVERY_URL: http://discovery:8000
       INVARIANT_API_CORS_ORIGINS: https://invariantsec.org
       # Pix checkout (routes/billing.py) -- vazio até existir um .env com as
       # credenciais reais nesta pasta; /billing/checkout responde 503 até lá.
       MERCADO_PAGO_ACCESS_TOKEN: ${MERCADO_PAGO_ACCESS_TOKEN:-}
       MERCADO_PAGO_WEBHOOK_SECRET: ${MERCADO_PAGO_WEBHOOK_SECRET:-}
       INVARIANT_API_BASE_URL: https://invariantsec.org
+      # Assina o cookie de sessão do admin (auth.py) -- esta é a stack real
+      # de produção (invariantsec.org), não o modo appliance nem a staging
+      # "next" de dev, então o valor precisa existir de verdade no .env
+      # local: fail-closed de propósito (sem fallback vazio) -- um deploy
+      # sem esse segredo não deve subir assinando sessão com um valor
+      # inseguro conhecido.
+      INVARIANT_API_SECRET_KEY: ${INVARIANT_API_SECRET_KEY:?INVARIANT_API_SECRET_KEY must be set}
     volumes: ["../../data/demo:/app/data/demo:ro"]
     networks: ["default", "vps-proxy"]
     expose: ["8000"]
