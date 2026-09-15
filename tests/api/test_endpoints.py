@@ -80,6 +80,122 @@ def test_create_cidr_range_endpoint(session_client):
     assert response.json()["address"] == "10.0.0.0/24"
 
 
+# --- POST /endpoints/bulk (CSV import) ---
+
+
+def test_bulk_endpoint_registered_before_dynamic_routes(session_client):
+    """A rota estática /bulk precisa ganhar de qualquer /{endpoint_id}/...
+    dinâmica -- confirma que bate no handler de bulk (aceita uma lista),
+    não em alguma rota dinâmica tentando interpretar "bulk" como id.
+    """
+    response = session_client.post("/endpoints/bulk", json=[])
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_bulk_create_endpoints_mixed_valid_and_invalid(session_client):
+    response = session_client.post(
+        "/endpoints/bulk",
+        json=[
+            {"row": 2, "address": "10.0.0.10", "label": "API"},
+            {"row": 3, "address": "not-an-ip", "label": "Ruim"},
+            {"row": 5, "address": "10.0.0.11", "label": "Banco"},
+        ],
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 3
+
+    created = {r["row"]: r for r in body if r["status"] == "created"}
+    errors = {r["row"]: r for r in body if r["status"] == "error"}
+
+    assert set(created) == {2, 5}
+    assert created[2]["id"] is not None
+    assert created[5]["id"] is not None
+
+    assert set(errors) == {3}
+    assert errors[3]["detail"] == "Endereço IP ou CIDR inválido."
+    assert errors[3]["id"] is None
+
+    # As válidas realmente foram persistidas -- uma linha inválida no meio
+    # não impediu as seguintes.
+    listed = {e["address"] for e in session_client.get("/endpoints").json()}
+    assert listed == {"10.0.0.10", "10.0.0.11"}
+
+
+def test_bulk_create_endpoints_duplicate_already_in_db(session_client):
+    session_client.post("/endpoints", json={"address": "10.0.0.20"})
+
+    response = session_client.post(
+        "/endpoints/bulk",
+        json=[{"row": 2, "address": "10.0.0.20", "label": "Já existe"}],
+    )
+
+    assert response.status_code == 200
+    result = response.json()[0]
+    assert result["status"] == "error"
+    assert result["detail"] == "Este endereço já está cadastrado."
+
+
+def test_bulk_create_endpoints_duplicate_within_same_payload(session_client):
+    response = session_client.post(
+        "/endpoints/bulk",
+        json=[
+            {"row": 2, "address": "10.0.0.30"},
+            {"row": 3, "address": "10.0.0.30"},
+        ],
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body[0]["row"] == 2 and body[0]["status"] == "created"
+    assert body[1]["row"] == 3 and body[1]["status"] == "error"
+    assert body[1]["detail"] == "Este endereço já está cadastrado."
+
+
+def test_bulk_row_number_reflects_original_file_line_not_array_position():
+    """Simula exatamente o caso levantado na revisão: cabeçalho na linha 1,
+    dado na linha 2, linha 3 vazia (nunca chega no backend -- o frontend
+    filtra antes), erro na linha 4. O payload que chega aqui já teria
+    row=2 e row=4 -- o backend só precisa preservar isso, não deduzir.
+    """
+    client = TestClient(main.app)
+    client.post("/auth/setup", json={"username": "admin", "password": "trocarSenha123"})
+
+    response = client.post(
+        "/endpoints/bulk",
+        json=[
+            {"row": 2, "address": "10.0.0.40", "label": "OK"},
+            {"row": 4, "address": "999.1.1.1", "label": "Ruim"},
+        ],
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body[0]["row"] == 2
+    assert body[1]["row"] == 4  # nunca 3, que seria a posição no array
+    assert body[1]["status"] == "error"
+
+
+def test_bulk_rejects_more_than_max_endpoints(session_client):
+    payload = [{"row": i, "address": f"10.0.{i // 256}.{i % 256}"} for i in range(501)]
+
+    response = session_client.post("/endpoints/bulk", json=payload)
+
+    assert response.status_code == 422
+    assert session_client.get("/endpoints").json() == []  # nada foi inserido
+
+
+def test_bulk_endpoints_requires_auth():
+    anonymous = TestClient(main.app)
+
+    response = anonymous.post("/endpoints/bulk", json=[{"row": 1, "address": "10.0.0.5"}])
+
+    assert response.status_code == 401
+
+
 def test_delete_endpoint(session_client):
     endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
 

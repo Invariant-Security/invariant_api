@@ -10,9 +10,12 @@ plugaria).
 """
 
 import ipaddress
+import logging
 from datetime import datetime, timezone
+from typing import Literal
 
 import httpx
+import psycopg
 from fastapi import APIRouter, Depends, HTTPException
 from invariant_contracts import DiscoveryResult, Endpoint, Finding
 from pydantic import BaseModel, Field
@@ -23,6 +26,14 @@ from invariant_api.routes.assess import _findings_from_run
 from invariant_api.storage import postgres as db
 
 router = APIRouter(prefix="/endpoints", dependencies=[Depends(require_admin_session)])
+
+logger = logging.getLogger(__name__)
+
+# Teto simples pra evitar um arquivo gigante virando milhares de inserts
+# numa chamada só -- também barra abuso acidental na demo. O tamanho do
+# arquivo em si já é limitado no frontend antes do upload; isso aqui é o
+# teto de itens, reforçado no lado que efetivamente escreve no banco.
+MAX_BULK_ENDPOINTS = 500
 
 
 def _validate_address(address: str) -> None:
@@ -40,6 +51,91 @@ def create_endpoint(payload: Endpoint) -> dict:
     conn.commit()
     conn.close()
     return {"id": endpoint_id, "address": payload.address, "label": payload.label, "tags": payload.tags}
+
+
+class BulkEndpointInput(BaseModel):
+    """`row` é o número de linha real do arquivo de origem (CSV), calculado
+    pelo frontend que é quem lê o arquivo -- nunca deduzido aqui pela
+    posição no array, já que cabeçalho/linhas vazias/linhas ignoradas
+    fazem a posição no array divergir da linha real do arquivo.
+    """
+
+    row: int
+    address: str
+    label: str | None = None
+    tags: list[str] = []
+
+
+class BulkEndpointResult(BaseModel):
+    row: int
+    address: str
+    label: str | None = None
+    status: Literal["created", "error"]
+    id: int | None = None
+    detail: str | None = None
+
+
+# Declarada logo depois do POST "" (item único) e ANTES de qualquer rota
+# dinâmica /{endpoint_id}/... de propósito -- se um dia existir uma rota
+# POST /{endpoint_id} de verbo igual, o FastAPI/Starlette casa pela ordem
+# de declaração, e "bulk" não pode nunca ser interpretado como um
+# endpoint_id. Hoje não há conflito real (as únicas rotas dinâmicas POST
+# são /{endpoint_id}/discover, /assess, /check, formato de path
+# diferente), mas a ordem já fica correta por garantia.
+@router.post("/bulk", response_model=list[BulkEndpointResult])
+def create_endpoints_bulk(payload: list[BulkEndpointInput]) -> list[BulkEndpointResult]:
+    if len(payload) > MAX_BULK_ENDPOINTS:
+        raise HTTPException(422, f"Máximo de {MAX_BULK_ENDPOINTS} endpoints por importação.")
+    results = []
+    conn = db.connect()
+    try:
+        for item in payload:
+            try:
+                _validate_address(item.address)
+                endpoint_id = db.insert_endpoint(conn, address=item.address, label=item.label, tags=item.tags)
+                conn.commit()
+                results.append(
+                    BulkEndpointResult(
+                        row=item.row, address=item.address, label=item.label, status="created", id=endpoint_id
+                    )
+                )
+            except HTTPException:
+                conn.rollback()
+                results.append(
+                    BulkEndpointResult(
+                        row=item.row,
+                        address=item.address,
+                        label=item.label,
+                        status="error",
+                        detail="Endereço IP ou CIDR inválido.",
+                    )
+                )
+            except psycopg.errors.UniqueViolation:
+                conn.rollback()
+                results.append(
+                    BulkEndpointResult(
+                        row=item.row,
+                        address=item.address,
+                        label=item.label,
+                        status="error",
+                        detail="Este endereço já está cadastrado.",
+                    )
+                )
+            except Exception:
+                conn.rollback()
+                logger.exception("Erro inesperado ao importar endpoint em lote: %r", item.address)
+                results.append(
+                    BulkEndpointResult(
+                        row=item.row,
+                        address=item.address,
+                        label=item.label,
+                        status="error",
+                        detail="Erro inesperado ao cadastrar este endereço.",
+                    )
+                )
+    finally:
+        conn.close()
+    return results
 
 
 @router.get("")
