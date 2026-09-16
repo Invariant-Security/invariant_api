@@ -42,6 +42,8 @@ _INSERT_DISCOVERY_RESULT = (_QUERIES_DIR / "insert_discovery_result.sql").read_t
 _SELECT_LATEST_DISCOVERY_RESULTS_BY_ENDPOINT = (
     _QUERIES_DIR / "select_latest_discovery_results_by_endpoint.sql"
 ).read_text()
+_INSERT_LEAD = (_QUERIES_DIR / "insert_lead.sql").read_text()
+_UPDATE_LEAD_SLACK_RESULT = (_QUERIES_DIR / "update_lead_slack_result.sql").read_text()
 
 
 def connect() -> psycopg.Connection:
@@ -397,3 +399,39 @@ def select_contract_by_id(conn: psycopg.Connection, *, id: int) -> dict | None:
             "created_at": created_at,
             "paid_at": paid_at,
         }
+
+
+def insert_lead(
+    conn: psycopg.Connection,
+    *,
+    name: str,
+    email: str,
+    company: str,
+    role: str | None,
+    target_scope: str,
+    environment_size: str | None,
+    primary_need: str | None,
+    message: str | None,
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            _INSERT_LEAD,
+            {
+                "name": name,
+                "email": email,
+                "company": company,
+                "role": role,
+                "target_scope": target_scope,
+                "environment_size": environment_size,
+                "primary_need": primary_need,
+                "message": message,
+            },
+        )
+        return cur.fetchone()[0]
+
+
+def update_lead_slack_result(
+    conn: psycopg.Connection, *, id: int, notified: bool, attempts: int, last_error: str | None
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_UPDATE_LEAD_SLACK_RESULT, {"id": id, "notified": notified, "attempts": attempts, "last_error": last_error})
