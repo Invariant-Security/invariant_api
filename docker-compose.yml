@@ -90,6 +90,10 @@ services:
       MERCADO_PAGO_ACCESS_TOKEN: ${MERCADO_PAGO_ACCESS_TOKEN:-}
       MERCADO_PAGO_WEBHOOK_SECRET: ${MERCADO_PAGO_WEBHOOK_SECRET:-}
       INVARIANT_API_BASE_URL: https://invariantsec.org
+      # Notificação de novos leads (routes/leads.py) -- vazio até existir um
+      # .env com o webhook real; sem isso, o lead continua sendo salvo
+      # normalmente, só não há notificação (slack_notified_at fica NULL).
+      SLACK_LEADS_WEBHOOK_URL: ${SLACK_LEADS_WEBHOOK_URL:-}
       # Assina o cookie de sessão do admin (auth.py) -- esta é a stack real
       # de produção (invariantsec.org), não o modo appliance nem a staging
       # "next" de dev, então o valor precisa existir de verdade no .env

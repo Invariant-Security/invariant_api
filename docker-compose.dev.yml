@@ -79,6 +79,10 @@ services:
       MERCADO_PAGO_ACCESS_TOKEN: ${MERCADO_PAGO_ACCESS_TOKEN:-}
       MERCADO_PAGO_WEBHOOK_SECRET: ${MERCADO_PAGO_WEBHOOK_SECRET:-}
       INVARIANT_API_BASE_URL: https://teste.invariantsec.org
+      # Notificação de novos leads (routes/leads.py) -- vazio até existir um
+      # .env com o webhook real; sem isso, o lead continua sendo salvo
+      # normalmente, só não há notificação (aceitável em teste).
+      SLACK_LEADS_WEBHOOK_URL: ${SLACK_LEADS_WEBHOOK_URL:-}
     volumes: ["../../data/demo:/app/data/demo:ro"]
     networks: ["default", "vps-proxy"]
     expose: ["8000"]
