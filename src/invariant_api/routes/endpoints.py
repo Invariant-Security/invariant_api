@@ -1,6 +1,9 @@
 """CRUD de endpoints (IP individual ou CIDR) + gatilho de discovery.
-Guardado por require_admin_session -- diferente de assess/ingest/demo, que
-continuam sem auth, de propósito, fora de escopo desta etapa.
+Guardado por require_admin_session -- mesma proteção de routes/assess.py
+e routes/reports.py agora (ver seus próprios comentários). /ingest e
+/api/demo/* continuam sem auth, de propósito: ingest não expõe nada do
+ambiente real do usuário, e /api/demo/* só lê arquivo estático gravado
+por demo.sh, nunca Docker/SSH ao vivo.
 
 Escopo desta etapa: só identificar o tipo de cada endpoint (Windows/Linux/
 Docker/WAF/firewall/VMware) e devolver a classificação. Rodar checks CIS

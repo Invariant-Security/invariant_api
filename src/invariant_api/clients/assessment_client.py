@@ -12,10 +12,12 @@ BASE_URL = os.environ.get("INVARIANT_ASSESSMENT_URL", "http://assessment:8000")
 
 
 def list_containers() -> list[dict]:
-    """Returns [{"name": str, "image": str}, ...] -- every container this
-    host's Docker socket can see, candidates for run_assessment()'s
-    `target`. See invariant_assessment's api.py for the exact
-    response_model.
+    """Returns [{"name": str, "image": str, "id": str}, ...] -- every
+    container this host's Docker socket can see, candidates for
+    run_assessment()'s `target`. `id` is the full (non-truncated)
+    Docker container ID -- routes/demo_snapshot.py uses it as the
+    stable key for the public demo's alias mapping. See
+    invariant_assessment's api.py for the exact response_model.
     """
     resp = httpx.get(f"{BASE_URL}/assessment/containers", timeout=10)
     resp.raise_for_status()

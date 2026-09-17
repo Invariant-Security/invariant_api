@@ -44,6 +44,12 @@ _SELECT_LATEST_DISCOVERY_RESULTS_BY_ENDPOINT = (
 ).read_text()
 _INSERT_LEAD = (_QUERIES_DIR / "insert_lead.sql").read_text()
 _UPDATE_LEAD_SLACK_RESULT = (_QUERIES_DIR / "update_lead_slack_result.sql").read_text()
+_GET_DEMO_ALIAS = (_QUERIES_DIR / "get_demo_alias.sql").read_text()
+_LIST_DEMO_ALIAS_NAMES = (_QUERIES_DIR / "list_demo_alias_names.sql").read_text()
+_INSERT_DEMO_ALIAS = (_QUERIES_DIR / "insert_demo_alias.sql").read_text()
+_INSERT_DEMO_SNAPSHOT = (_QUERIES_DIR / "insert_demo_snapshot.sql").read_text()
+_SELECT_ACTIVE_DEMO_SNAPSHOT = (_QUERIES_DIR / "select_active_demo_snapshot.sql").read_text()
+_REVOKE_ACTIVE_DEMO_SNAPSHOT = (_QUERIES_DIR / "revoke_active_demo_snapshot.sql").read_text()
 
 
 def connect() -> psycopg.Connection:
@@ -435,3 +441,49 @@ def update_lead_slack_result(
 ) -> None:
     with conn.cursor() as cur:
         cur.execute(_UPDATE_LEAD_SLACK_RESULT, {"id": id, "notified": notified, "attempts": attempts, "last_error": last_error})
+
+
+def get_demo_alias(conn: psycopg.Connection, *, container_id: str) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(_GET_DEMO_ALIAS, {"container_id": container_id})
+        row = cur.fetchone()
+        if row is None:
+            return None
+        alias_name, alias_image = row
+        return {"alias_name": alias_name, "alias_image": alias_image}
+
+
+def list_demo_alias_names(conn: psycopg.Connection) -> list[str]:
+    with conn.cursor() as cur:
+        cur.execute(_LIST_DEMO_ALIAS_NAMES)
+        return [name for (name,) in cur.fetchall()]
+
+
+def insert_demo_alias(conn: psycopg.Connection, *, container_id: str, alias_name: str, alias_image: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_INSERT_DEMO_ALIAS, {"container_id": container_id, "alias_name": alias_name, "alias_image": alias_image})
+
+
+def insert_demo_snapshot(conn: psycopg.Connection, *, containers: list[dict]) -> int:
+    with conn.cursor() as cur:
+        cur.execute(_INSERT_DEMO_SNAPSHOT, {"containers": Jsonb(containers)})
+        return cur.fetchone()[0]
+
+
+def select_active_demo_snapshot(conn: psycopg.Connection) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_ACTIVE_DEMO_SNAPSHOT)
+        row = cur.fetchone()
+        if row is None:
+            return None
+        id, containers, created_at = row
+        return {"id": id, "containers": containers, "created_at": created_at}
+
+
+def revoke_active_demo_snapshot(conn: psycopg.Connection) -> bool:
+    """True se algum snapshot ativo foi revogado, False se não havia
+    nenhum pra revogar (não é erro -- GET público já volta vazio de
+    qualquer jeito nesse caso)."""
+    with conn.cursor() as cur:
+        cur.execute(_REVOKE_ACTIVE_DEMO_SNAPSHOT)
+        return cur.fetchone() is not None
