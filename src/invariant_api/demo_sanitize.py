@@ -70,9 +70,19 @@ def known_real_identifiers(conn: psycopg.Connection) -> list[tuple[str, str]]:
 
     for c in assessment_client.list_containers():
         tokens.append((c["name"], "container_name"))
-        tokens.append((c["image"], "container_image"))
-        for t in _distinctive_image_tokens(c["image"]):
-            tokens.append((t, "container_image_org"))
+        distinctive = _distinctive_image_tokens(c["image"])
+        # A string completa da imagem só entra como identificador
+        # conhecido se ela tiver pelo menos um pedaço distintivo (não
+        # genérico/versão) -- senão uma imagem 100% genérica (ex.:
+        # "postgres:16", usada pelo próprio Postgres do Invariant, não
+        # de um cliente) vira falso positivo contra qualquer alias
+        # fictício com versão parecida (ex.: ".../postgres:16.2" bate
+        # substring com "postgres:16"). Confirmado com um vazamento
+        # falso real durante teste em teste.invariantsec.org.
+        if distinctive:
+            tokens.append((c["image"], "container_image"))
+            for t in distinctive:
+                tokens.append((t, "container_image_org"))
 
     for e in db.select_endpoints(conn):
         tokens.append((e["address"], "endpoint_address"))

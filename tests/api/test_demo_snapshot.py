@@ -180,6 +180,44 @@ def test_leak_scan_blocks_known_internal_domain():
     assert any(i["category"] == "internal_domain" for i in issues)
 
 
+def test_leak_scan_ignores_fully_generic_background_images(monkeypatch):
+    """Regressão de um falso positivo real encontrado em teste.invariantsec.org:
+    um container de infra do próprio Invariant com imagem "postgres:16"
+    (100% genérica -- sem nenhum pedaço distintivo) bloqueava a
+    publicação porque "postgres:16" é substring de ".../postgres:16.2",
+    a imagem fictícia do alias "app-db" no pool. A imagem completa de um
+    container só deve virar identificador conhecido quando tem pelo
+    menos um pedaço distintivo (nome de org/projeto), nunca quando é só
+    nome-genérico+versão.
+
+    Força o alias "app-db" (terceira entrada do pool) pro container
+    sendo publicado, reservando as duas primeiras antes -- sem isso, o
+    teste passaria mesmo com o bug antigo, já que "app-frontend" não
+    colide com "postgres:16" de qualquer jeito.
+    """
+    conn = db.connect()
+    db.insert_demo_alias(conn, container_id="other-1", alias_name="app-frontend", alias_image="x1")
+    db.insert_demo_alias(conn, container_id="other-2", alias_name="app-backend", alias_image="x2")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        assessment_client,
+        "list_containers",
+        lambda: [
+            {"name": _REAL_NAME, "image": _REAL_IMAGE, "id": _REAL_CONTAINER_ID},
+            {"name": "invariant-next-dev-postgres-1", "image": "postgres:16", "id": "infra-postgres-id"},
+            {"name": "invariant-next-dev-redis-1", "image": "redis:7-alpine", "id": "infra-redis-id"},
+        ],
+    )
+
+    response = _publish()
+
+    assert response.status_code == 200
+    alias_name = anonymous.get("/demo-snapshot").json()["containers"][0]["name"]
+    assert alias_name == "app-db"
+
+
 def test_alias_is_stable_across_publishes_even_if_real_name_changes(monkeypatch):
     first = _publish()
     assert first.status_code == 200
