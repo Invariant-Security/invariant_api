@@ -37,6 +37,15 @@ _GENERIC_IMAGE_TERMS = {
     "db", "queue", "job", "edge", "proxy", "alpine", "slim", "bullseye", "bookworm",
     "debian", "ubuntu", "centos", "fedora", "node", "python", "golang", "java",
     "ghcr.io", "docker.io", "index.docker.io", "quay.io", "library", "latest",
+    # Docker reports a dangling/untagged image as "sha256:<digest>" instead
+    # of a repo:tag -- splitting that on "/:" leaves the bare algorithm
+    # name as its own token. Found live: three real Postgres containers
+    # (liliankaliaki/babybet) report exactly this, and "sha256" alone then
+    # false-positived against completely unrelated evidence that happens to
+    # mention "sha256" -- e.g. sshd's KexAlgorithms list, TLS cipher names,
+    # file checksums. The digest itself is still kept as a token (a random
+    # 64-hex-char string is not going to collide by accident).
+    "sha256", "sha384", "sha512", "sha1", "md5",
 }
 _VERSION_RE = re.compile(r"^v?\d+(\.\d+){0,3}([-.].+)?$")
 _MIN_TOKEN_LENGTH = 4

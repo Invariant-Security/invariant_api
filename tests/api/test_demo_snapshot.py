@@ -233,6 +233,45 @@ def test_leak_scan_blocks_known_internal_domain():
     assert any(i["category"] == "internal_domain" for i in issues)
 
 
+def test_leak_scan_ignores_bare_digest_algorithm_name_from_dangling_real_image(monkeypatch):
+    """Regressão de um falso positivo real encontrado publicando o
+    primeiro lote do Demo Lab em teste.invariantsec.org: um container
+    real (não-demo) com imagem dangling/untagged aparece no
+    `docker ps` como "sha256:<digest>" em vez de repo:tag --
+    _distinctive_image_tokens() splitava isso em ["sha256", "<digest>"],
+    e "sha256" sozinho virava identificador "conhecido" que batia
+    contra qualquer evidência genuína mencionando sha256 (KexAlgorithms
+    do sshd, cifras TLS, checksum de arquivo...). "sha256"/"sha512" etc
+    agora são termos genéricos, nunca token distintivo.
+    """
+    monkeypatch.setattr(
+        assessment_client,
+        "list_containers",
+        lambda: [
+            {"name": _DEMO_NAME, "image": _DEMO_IMAGE, "id": _DEMO_CONTAINER_ID, "is_demo": True},
+            {
+                "name": "some-real-postgres-1",
+                "image": "sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b",
+                "id": "dangling-real-id",
+                "is_demo": False,
+            },
+        ],
+    )
+
+    response = _publish(
+        findings=[
+            _finding(
+                evidence_output=(
+                    "sshd_config: KexAlgorithms sntrup761x25519-sha512,curve25519-sha256,"
+                    "ecdh-sha2-nistp256"
+                )
+            )
+        ]
+    )
+
+    assert response.status_code == 200
+
+
 def test_leak_scan_ignores_fully_generic_background_images(monkeypatch):
     """Regressão de um falso positivo real encontrado em teste.invariantsec.org:
     um container de infra do próprio Invariant com imagem "postgres:16"
