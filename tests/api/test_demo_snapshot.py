@@ -3,6 +3,13 @@ discipline as test_endpoints.py. assessment_client.list_containers is
 monkeypatched to control the "live" container list both the metadata
 verification and the leak scan's known-identifiers use -- never mock
 the leak scan itself, it's the thing under test.
+
+Two distinct "real" fixtures on purpose: `_DEMO_*` is an Invariant Demo
+Lab asset (is_demo=True -- eligible to publish), `_BACKGROUND_REAL_*` is
+a real, non-demo container that just happens to also exist on the host
+(is_demo=False, never published) -- used to prove the leak scan still
+catches a genuinely real identifier leaking into a demo container's
+evidence, without that identifier being the thing being published.
 """
 
 import psycopg
@@ -21,14 +28,18 @@ client = TestClient(main.app)
 client.cookies.set("invariant_session", create_session_cookie("admin"))
 anonymous = TestClient(main.app)
 
-_REAL_CONTAINER_ID = "a1b2c3d4e5f6realcontaineridfulllength"
-_REAL_NAME = "tamois-ia-juridica-tamois"
-_REAL_IMAGE = "ghcr.io/tamois-real-org/tamois:v1"
+_DEMO_CONTAINER_ID = "d1e2m3o4realcontaineridfulllength"
+_DEMO_NAME = "demo-web-01"
+_DEMO_IMAGE = "demo-lab/web:1"
+
+_BACKGROUND_REAL_ID = "a1b2c3d4e5f6realcontaineridfulllength"
+_BACKGROUND_REAL_NAME = "tamois-ia-juridica-tamois"
+_BACKGROUND_REAL_IMAGE = "ghcr.io/tamois-real-org/tamois:v1"
 
 
 def _finding(**overrides) -> dict:
     base = {
-        "target": _REAL_NAME,
+        "target": _DEMO_NAME,
         "external_id": "5.1.20",
         "status": "FAIL",
         "control_title": "Ensure sshd PermitRootLogin is disabled",
@@ -70,11 +81,14 @@ def fake_live_containers(monkeypatch):
     monkeypatch.setattr(
         assessment_client,
         "list_containers",
-        lambda: [{"name": _REAL_NAME, "image": _REAL_IMAGE, "id": _REAL_CONTAINER_ID}],
+        lambda: [
+            {"name": _DEMO_NAME, "image": _DEMO_IMAGE, "id": _DEMO_CONTAINER_ID, "is_demo": True},
+            {"name": _BACKGROUND_REAL_NAME, "image": _BACKGROUND_REAL_IMAGE, "id": _BACKGROUND_REAL_ID, "is_demo": False},
+        ],
     )
 
 
-def _publish(container_id=_REAL_CONTAINER_ID, findings=None):
+def _publish(container_id=_DEMO_CONTAINER_ID, findings=None):
     return client.post(
         "/demo-snapshot/publish",
         json={"containers": [{"container_id": container_id, "findings": findings or [_finding()]}]},
@@ -114,8 +128,8 @@ def test_publish_with_clean_payload_persists_and_sanitizes():
     assert snapshot["published_at"] is not None
     assert len(snapshot["containers"]) == 1
     container = snapshot["containers"][0]
-    assert container["name"] != _REAL_NAME
-    assert container["image"] != _REAL_IMAGE
+    assert container["name"] != _DEMO_NAME
+    assert container["image"] != _DEMO_IMAGE
     assert container["name"].startswith(("app-", "cache-", "queue-", "gateway-")) or "-" in container["name"]
     assert container["findings"][0]["target"] == container["name"]
 
@@ -128,6 +142,42 @@ def test_publish_rejects_container_id_not_in_live_list():
     assert anonymous.get("/demo-snapshot").json()["containers"] == []
 
 
+def test_publish_rejects_real_container_not_labeled_as_demo():
+    """O label invariant.public-demo é o único critério de elegibilidade
+    -- um container real (existe na lista atual, sem o label) nunca
+    pode ser publicado, mesmo com findings/evidence 100% limpos.
+    """
+    response = _publish(container_id=_BACKGROUND_REAL_ID, findings=[_finding(evidence_output="clean, generic evidence")])
+
+    assert response.status_code == 422
+    body = response.json()["detail"]
+    assert _BACKGROUND_REAL_ID in body["not_demo_container_ids"]
+    assert anonymous.get("/demo-snapshot").json()["containers"] == []
+
+
+def test_preview_reports_not_demo_container_ids_without_raising():
+    response = client.post(
+        "/demo-snapshot/preview",
+        json={"containers": [{"container_id": _BACKGROUND_REAL_ID, "findings": [_finding()]}]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert _BACKGROUND_REAL_ID in body["not_demo_container_ids"]
+
+
+def test_known_real_identifiers_excludes_demo_labeled_containers():
+    """demo_sanitize.known_real_identifiers() pula containers com
+    is_demo=True -- um ativo do Demo Lab é seguro de expor por
+    definição, então seu próprio nome/imagem real nunca deveria virar
+    um "identificador a proteger" que bloqueia a própria publicação.
+    """
+    response = _publish(findings=[_finding(evidence_output=f"target container is {_DEMO_NAME} running {_DEMO_IMAGE}")])
+
+    assert response.status_code == 200
+
+
 def test_leak_scan_ignores_isolated_generic_terms():
     response = _publish(findings=[_finding(evidence_output="postgres is running as expected"), _finding(evidence_output="nginx config looks fine")])
 
@@ -135,7 +185,10 @@ def test_leak_scan_ignores_isolated_generic_terms():
 
 
 def test_leak_scan_blocks_real_container_name():
-    response = _publish(findings=[_finding(evidence_output=f"found reference to {_REAL_NAME} in config")])
+    """Defesa em profundidade: mesmo publicando um ativo demo de
+    verdade, se a evidência citar o nome de um container REAL (não-demo)
+    que existe no mesmo host, a publicação continua bloqueada."""
+    response = _publish(findings=[_finding(evidence_output=f"found reference to {_BACKGROUND_REAL_NAME} in config")])
 
     assert response.status_code == 422
     issues = response.json()["detail"]["issues"]
@@ -152,7 +205,7 @@ def test_leak_scan_blocks_distinctive_image_org():
 
 
 def test_leak_scan_blocks_full_real_image_string():
-    response = _publish(findings=[_finding(remediation=f"rebuild image {_REAL_IMAGE} with the fix applied")])
+    response = _publish(findings=[_finding(remediation=f"rebuild image {_BACKGROUND_REAL_IMAGE} with the fix applied")])
 
     assert response.status_code == 422
     issues = response.json()["detail"]["issues"]
@@ -205,9 +258,9 @@ def test_leak_scan_ignores_fully_generic_background_images(monkeypatch):
         assessment_client,
         "list_containers",
         lambda: [
-            {"name": _REAL_NAME, "image": _REAL_IMAGE, "id": _REAL_CONTAINER_ID},
-            {"name": "invariant-next-dev-postgres-1", "image": "postgres:16", "id": "infra-postgres-id"},
-            {"name": "invariant-next-dev-redis-1", "image": "redis:7-alpine", "id": "infra-redis-id"},
+            {"name": _DEMO_NAME, "image": _DEMO_IMAGE, "id": _DEMO_CONTAINER_ID, "is_demo": True},
+            {"name": "invariant-next-dev-postgres-1", "image": "postgres:16", "id": "infra-postgres-id", "is_demo": False},
+            {"name": "invariant-next-dev-redis-1", "image": "redis:7-alpine", "id": "infra-redis-id", "is_demo": False},
         ],
     )
 
@@ -227,7 +280,7 @@ def test_alias_is_stable_across_publishes_even_if_real_name_changes(monkeypatch)
     monkeypatch.setattr(
         assessment_client,
         "list_containers",
-        lambda: [{"name": "tamois-renamed", "image": _REAL_IMAGE, "id": _REAL_CONTAINER_ID}],
+        lambda: [{"name": "demo-web-01-renamed", "image": _DEMO_IMAGE, "id": _DEMO_CONTAINER_ID, "is_demo": True}],
     )
     second = _publish()
     assert second.status_code == 200
@@ -239,7 +292,7 @@ def test_alias_is_stable_across_publishes_even_if_real_name_changes(monkeypatch)
 def test_alias_reserved_in_preview_is_reused_in_publish():
     preview_response = client.post(
         "/demo-snapshot/preview",
-        json={"containers": [{"container_id": _REAL_CONTAINER_ID, "findings": [_finding()]}]},
+        json={"containers": [{"container_id": _DEMO_CONTAINER_ID, "findings": [_finding()]}]},
     )
     assert preview_response.status_code == 200
     preview_alias = preview_response.json()["containers"][0]["name"]

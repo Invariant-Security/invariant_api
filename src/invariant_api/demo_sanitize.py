@@ -5,6 +5,16 @@ sistema, não um detector genérico de PII/segredo (isso seria complexo e
 pouco confiável pro problema real, que é vazar nome/imagem/endereço do
 ambiente do Victor, não qualquer string sensível em abstrato).
 
+Desde a introdução do Invariant Demo Lab (containers construídos
+especificamente pra demonstração, dado fictício desde a origem, ver
+demo_lab/), isto deixou de ser a fronteira principal de segurança --
+essa fronteira agora é o label `invariant.public-demo=true`, checado em
+routes/demo_snapshot.py antes de qualquer coisa chegar aqui. Este scan
+continua ativo como defesa em profundidade contra bug/erro operacional
+(ex.: um `container_id` real vazando por engano), não como política pra
+tentar adivinhar se um caminho de arquivo é "seguro" -- dentro do Demo
+Lab, todo caminho já é seguro por construção.
+
 Termos genéricos de infra (postgres, nginx, redis, frontend, backend,
 versões...) são explicitamente filtrados antes de entrar na lista de
 identificadores conhecidos -- eles aparecem tanto no snapshot fictício
@@ -63,12 +73,21 @@ def _distinctive_image_tokens(image: str) -> list[str]:
 
 def known_real_identifiers(conn: psycopg.Connection) -> list[tuple[str, str]]:
     """[(token, categoria)] -- identificadores distintivos do ambiente
-    real atual. Recalculado a cada preview/publish, nunca cacheado --
-    um container pode ter sido criado/removido desde a última chamada.
+    real (não-demo) atual. Recalculado a cada preview/publish, nunca
+    cacheado -- um container pode ter sido criado/removido desde a
+    última chamada.
+
+    Containers com o label `invariant.public-demo=true` (Invariant Demo
+    Lab) são pulados de propósito -- são seguros de expor por
+    definição, então não faz sentido tratá-los como "identificador a
+    proteger" (isso também evita colisão de um container demo contra o
+    alias fictício de outro container demo).
     """
     tokens: list[tuple[str, str]] = []
 
     for c in assessment_client.list_containers():
+        if c.get("is_demo"):
+            continue
         tokens.append((c["name"], "container_name"))
         distinctive = _distinctive_image_tokens(c["image"])
         # A string completa da imagem só entra como identificador

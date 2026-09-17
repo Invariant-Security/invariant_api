@@ -3,16 +3,26 @@ operacional (routes/assess.py, routes/reports.py), só estas, que nunca
 tocam o ambiente real diretamente. GET aqui é sempre público, de
 propósito; POST sempre exige sessão de admin.
 
+Fonte autorizada de publicação: só ativos do Invariant Demo Lab (ver
+demo_lab/ -- containers construídos especificamente pra demonstração,
+com dado fictício desde a origem, marcados com o label Docker
+`invariant.public-demo=true`). Não é mais "avalia ambiente real depois
+tenta esconder pedaço" -- o Demo Lab não tem nada real pra vazar. Esse
+label é o ÚNICO critério de elegibilidade, checado aqui no backend
+(nunca só escondido no frontend) -- ver `not_demo` em
+_sanitize_and_scan().
+
 Fluxo de publicação: o admin manda `container_id` (Docker ID real,
 completo) + os findings já obtidos ao vivo (ainda vêm do frontend
 porque não são persistidos hoje -- não tem outro jeito de obtê-los
-nesta rodada). O backend NUNCA confia em nome/imagem que o navegador
-mandar -- eles são sempre resolvidos aqui contra a lista real atual
-(assessment_client.list_containers()), sanitizados (alias fictício
-estável por container_id, ver demo_identities.py) e varridos contra
-identificadores reais conhecidos (demo_sanitize.py) antes de qualquer
-persistência. Isso é recalculado do zero em toda chamada -- nunca
-confia num preview anterior.
+nesta rodada). O backend NUNCA confia em nome/imagem/elegibilidade que
+o navegador mandar -- tudo é resolvido aqui contra a lista real atual
+(assessment_client.list_containers()), sanitizado (alias fictício
+estável por container_id, ver demo_identities.py) e varrido contra
+identificadores reais conhecidos (demo_sanitize.py, defesa em
+profundidade contra erro operacional, não mais a fronteira principal)
+antes de qualquer persistência. Isso é recalculado do zero em toda
+chamada -- nunca confia num preview anterior.
 """
 
 from typing import Literal
@@ -42,14 +52,23 @@ class PublishRequest(BaseModel):
     containers: list[RealContainerInput]
 
 
-def _sanitize_and_scan(conn, containers: list[RealContainerInput]) -> tuple[list[dict], list[dict], list[str]]:
+def _sanitize_and_scan(
+    conn, containers: list[RealContainerInput]
+) -> tuple[list[dict], list[dict], list[str], list[str]]:
     live_by_id = {c["id"]: c for c in assessment_client.list_containers()}
     sanitized = []
     unverified = []
+    not_demo = []
     for c in containers:
         live = live_by_id.get(c.container_id)
         if live is None:
             unverified.append(c.container_id)
+            continue
+        # invariant.public-demo é o ÚNICO critério de elegibilidade --
+        # nunca inferido por nome. Ausência do label = não publicável,
+        # sempre, mesmo que o admin já tenha avaliado esse container.
+        if not live.get("is_demo"):
+            not_demo.append(c.container_id)
             continue
         alias_name, alias_image = get_or_assign_alias(conn, container_id=c.container_id)
         sanitized.append(
@@ -60,35 +79,38 @@ def _sanitize_and_scan(conn, containers: list[RealContainerInput]) -> tuple[list
             }
         )
     issues = leak_scan(sanitized, known_real_identifiers(conn))
-    return sanitized, issues, unverified
+    return sanitized, issues, unverified, not_demo
 
 
 @router.post("/preview", dependencies=[Depends(require_admin_session)])
 def preview(payload: PublishRequest) -> dict:
     with db.connect() as conn:
-        sanitized, issues, unverified = _sanitize_and_scan(conn, payload.containers)
+        sanitized, issues, unverified, not_demo = _sanitize_and_scan(conn, payload.containers)
     return {
-        "ok": not issues and not unverified,
+        "ok": not issues and not unverified and not not_demo,
         "containers": sanitized,
         "issues": issues,
         "unverified_container_ids": unverified,
+        "not_demo_container_ids": not_demo,
     }
 
 
 @router.post("/publish", dependencies=[Depends(require_admin_session)])
 def publish(payload: PublishRequest) -> dict:
     with db.connect() as conn:
-        sanitized, issues, unverified = _sanitize_and_scan(conn, payload.containers)
-        if issues or unverified:
+        sanitized, issues, unverified, not_demo = _sanitize_and_scan(conn, payload.containers)
+        if issues or unverified or not_demo:
             raise HTTPException(
                 422,
                 {
                     "message": (
                         "Não foi possível publicar a demo. Foram encontrados identificadores do "
-                        "ambiente real em campos do snapshot."
+                        "ambiente real em campos do snapshot, ou algum ativo enviado não pertence "
+                        "ao ambiente demonstrativo e não pode ser publicado."
                     ),
                     "issues": issues,
                     "unverified_container_ids": unverified,
+                    "not_demo_container_ids": not_demo,
                 },
             )
         db.insert_demo_snapshot(conn, containers=sanitized)
