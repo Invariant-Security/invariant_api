@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from invariant_api.auth import require_admin_session
 from invariant_api.clients import assessment_client, discovery_client
+from invariant_api.demo_sanitize import is_demo_endpoint
 from invariant_api.routes.assess import _findings_from_run
 from invariant_api.storage import postgres as db
 
@@ -143,10 +144,16 @@ def create_endpoints_bulk(payload: list[BulkEndpointInput]) -> list[BulkEndpoint
 
 @router.get("")
 def list_endpoints() -> list[dict]:
+    """`is_demo` mesmo padrão de `GET /api/containers` -- só exibição/
+    agrupamento no frontend ("Ambiente demonstrativo"/"Ambiente
+    operacional"). O critério real de elegibilidade pra publicação
+    pública é sempre reconferido ao vivo em routes/demo_host_snapshot.py,
+    nunca confiado a partir deste campo.
+    """
     conn = db.connect()
     endpoints = db.select_endpoints(conn)
     conn.close()
-    return endpoints
+    return [{**e, "is_demo": is_demo_endpoint(e["address"])} for e in endpoints]
 
 
 @router.delete("/{endpoint_id}")

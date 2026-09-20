@@ -70,3 +70,41 @@ def get_or_assign_alias(conn: psycopg.Connection, *, container_id: str) -> tuple
             conn.rollback()
             continue
     raise RuntimeError("não foi possível atribuir um alias de demo")  # inatingível dado o fallback numerado
+
+
+# Faixa de documentação RFC 5737 (TEST-NET-1) -- nunca roteável, mesmo
+# espírito do DEMO_REGISTRY acima. Nomes ".internal" fictícios, nunca
+# um domínio real registrável.
+DEMO_HOST_POOL = [
+    ("web-prod-03.internal", "192.0.2.11"),
+    ("app-prod-07.internal", "192.0.2.12"),
+    ("db-prod-01.internal", "192.0.2.13"),
+    ("legacy-srv-02.internal", "192.0.2.14"),
+]
+
+
+def get_or_assign_host_alias(conn: psycopg.Connection, *, endpoint_id: int) -> tuple[str, str]:
+    """Espelha get_or_assign_alias (mesma estabilidade/retry/fallback
+    numerado) -- só que a chave é o `id` (SERIAL, já permanente) do
+    endpoint, não um Docker ID externo. Ao contrário de containers,
+    endpoints não têm problema de "recriação com ID novo": o `id` de
+    um endpoint nunca muda enquanto a linha existir.
+    """
+    existing = db.get_demo_host_alias(conn, endpoint_id=endpoint_id)
+    if existing:
+        return existing["alias_label"], existing["alias_address"]
+
+    used_labels = set(db.list_demo_host_alias_labels(conn))
+    n = len(used_labels) + 1
+    candidates = [(label, address) for label, address in DEMO_HOST_POOL if label not in used_labels]
+    candidates.append((f"extra-host-{n}.internal", f"198.51.100.{n}"))
+
+    for alias_label, alias_address in candidates:
+        try:
+            db.insert_demo_host_alias(conn, endpoint_id=endpoint_id, alias_label=alias_label, alias_address=alias_address)
+            conn.commit()
+            return alias_label, alias_address
+        except psycopg.errors.UniqueViolation:
+            conn.rollback()
+            continue
+    raise RuntimeError("não foi possível atribuir um alias de host de demo")  # inatingível dado o fallback numerado

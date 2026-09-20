@@ -80,6 +80,33 @@ def test_create_cidr_range_endpoint(session_client):
     assert response.json()["address"] == "10.0.0.0/24"
 
 
+def test_list_annotates_is_demo_for_addresses_inside_the_reserved_range(session_client):
+    session_client.post("/endpoints", json={"address": "10.89.77.11", "label": "demo-host-web-01"})
+
+    listed = session_client.get("/endpoints").json()
+
+    assert len(listed) == 1
+    assert listed[0]["is_demo"] is True
+
+
+def test_list_annotates_is_demo_false_for_real_addresses(session_client):
+    session_client.post("/endpoints", json={"address": "10.0.0.5", "label": "gateway"})
+
+    listed = session_client.get("/endpoints").json()
+
+    assert listed[0]["is_demo"] is False
+
+
+def test_list_annotates_is_demo_false_for_cidr_ranges_even_inside_the_reserved_network(session_client):
+    # is_demo_endpoint só é True pra um IP único -- uma faixa CIDR
+    # nunca é elegível, mesmo se estiver dentro de 10.89.77.0/24.
+    session_client.post("/endpoints", json={"address": "10.89.77.0/28", "tags": []})
+
+    listed = session_client.get("/endpoints").json()
+
+    assert listed[0]["is_demo"] is False
+
+
 # --- POST /endpoints/bulk (CSV import) ---
 
 

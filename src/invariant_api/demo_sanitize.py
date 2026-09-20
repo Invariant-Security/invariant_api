@@ -23,13 +23,35 @@ falso positivo constante, bloqueando publicações que não vazam nada de
 verdade.
 """
 
+import ipaddress
 import re
 import socket
 
 import psycopg
+from invariant_contracts import Finding
 
 from invariant_api.clients import assessment_client
 from invariant_api.storage import postgres as db
+
+# Faixa reservada e isolada da LXD pro Demo Lab de Hosts Linux (ver
+# demo_lab/docs/networking.md) -- o equivalente, pra hosts, do label
+# Docker `invariant.public-demo=true` dos containers: um fato de
+# infraestrutura verificado ao vivo a cada preview/publish, nunca uma
+# coluna gravável só pelo painel admin.
+_DEMO_LAB_HOSTS_NETWORK = ipaddress.ip_network("10.89.77.0/24")
+
+
+def is_demo_endpoint(address: str) -> bool:
+    """True só se `address` for um único IP (não uma faixa/CIDR) dentro
+    da rede reservada do Demo Lab de Hosts. Entrada inválida ou uma
+    faixa (`endpoints.address` já aceita CIDR hoje) sempre vira False,
+    nunca uma exceção -- nunca deveria derrubar /preview ou /publish.
+    """
+    try:
+        return ipaddress.ip_address(address) in _DEMO_LAB_HOSTS_NETWORK
+    except ValueError:
+        return False
+
 
 _GENERIC_IMAGE_TERMS = {
     "postgres", "postgresql", "nginx", "redis", "mysql", "mariadb", "mongo", "mongodb",
@@ -90,7 +112,9 @@ def known_real_identifiers(conn: psycopg.Connection) -> list[tuple[str, str]]:
     Lab) são pulados de propósito -- são seguros de expor por
     definição, então não faz sentido tratá-los como "identificador a
     proteger" (isso também evita colisão de um container demo contra o
-    alias fictício de outro container demo).
+    alias fictício de outro container demo). Endpoints dentro da faixa
+    reservada do Demo Lab de Hosts (`is_demo_endpoint`) são pulados
+    pelo mesmo motivo.
     """
     tokens: list[tuple[str, str]] = []
 
@@ -113,6 +137,8 @@ def known_real_identifiers(conn: psycopg.Connection) -> list[tuple[str, str]]:
                 tokens.append((t, "container_image_org"))
 
     for e in db.select_endpoints(conn):
+        if is_demo_endpoint(e["address"]):
+            continue
         tokens.append((e["address"], "endpoint_address"))
         label = e.get("label")
         if label and len(label) >= _MIN_TOKEN_LENGTH and label.lower() not in _GENERIC_IMAGE_TERMS:
@@ -123,6 +149,37 @@ def known_real_identifiers(conn: psycopg.Connection) -> list[tuple[str, str]]:
     tokens += [(p, "known_project_name") for p in _KNOWN_PROJECT_NAMES]
 
     return [(t, cat) for t, cat in tokens if t and len(t) >= _MIN_TOKEN_LENGTH]
+
+
+_REDACTABLE_FINDING_FIELDS = ("target", "evidence_output", "remediation", "raw_artifact_path")
+
+
+def redact_real_identity(finding: Finding, replacements: list[tuple[str, str]]) -> Finding:
+    """Substitui toda ocorrência de um identificador real (nome/imagem
+    de container, endereço/label de host) pelo alias correspondente,
+    em TODO campo de texto do finding -- não só `target`. Sem isso, um
+    card público podia mostrar o alias (`web-prod-03.internal`)
+    enquanto a evidência do mesmo finding cita o nome/IP real do ativo
+    do Demo Lab (`demo-host-web-01`/`10.89.77.11`) -- não é um dado
+    sensível (o Demo Lab é seguro por construção), mas quebra a
+    coerência da identidade pública apresentada.
+
+    `replacements` é reordenado do mais longo pro mais curto antes de
+    aplicar -- evita substituição parcial indevida quando um valor é
+    substring de outro (ex.: um label curto que por acaso aparece
+    dentro de um endereço mais longo).
+    """
+    replacements = sorted(replacements, key=lambda pair: len(pair[0]), reverse=True)
+    updates = {}
+    for field in _REDACTABLE_FINDING_FIELDS:
+        value = getattr(finding, field)
+        if not isinstance(value, str):
+            continue  # raw_artifact_path etc. podem vir None -- nunca assumir str
+        for real, alias in replacements:
+            if real and real in value:
+                value = value.replace(real, alias)
+        updates[field] = value
+    return finding.model_copy(update=updates)
 
 
 def _scan_field(value, *, field_path: str, known_tokens: list[tuple[str, str]], issues: list[dict], seen: set[tuple[str, str]]) -> None:
@@ -157,6 +214,56 @@ def leak_scan(sanitized_containers: list[dict], known_tokens: list[tuple[str, st
                 _scan_field(
                     value,
                     field_path=f"containers[{i}].findings[{j}].{key}",
+                    known_tokens=known_tokens,
+                    issues=issues,
+                    seen=seen,
+                )
+    return issues
+
+
+def verify_redaction(sanitized_items: list[dict], replacements: list[tuple[str, str]]) -> list[dict]:
+    """Confere que nenhum valor real usado em `redact_real_identity`
+    sobreviveu no item já sanitizado -- diferente do `leak_scan`
+    (que procura identificadores de infraestrutura real não-demo,
+    deliberadamente NUNCA incluindo ativos do Demo Lab no seu corpus),
+    isto aqui verifica a própria substituição: o dado do Demo Lab não é
+    sensível, mas um card público mostrando `web-prod-03.internal`
+    numa linha e `demo-host-web-01`/`10.89.77.11` na evidência ao lado
+    quebraria a coerência da identidade pública apresentada. Uma
+    ocorrência aqui é sempre bug de redaction (a lista de
+    `replacements` está incompleta), não vazamento de dado sensível --
+    reportado com a categoria `redaction_incomplete` pra não ser
+    confundido com um achado do `leak_scan`.
+    """
+    real_tokens = [(real, "redaction_incomplete") for real, _alias in replacements if real]
+    issues: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for i, item in enumerate(sanitized_items):
+        _scan_field(item.get("name"), field_path=f"[{i}].name", known_tokens=real_tokens, issues=issues, seen=seen)
+        _scan_field(item.get("image"), field_path=f"[{i}].image", known_tokens=real_tokens, issues=issues, seen=seen)
+        _scan_field(item.get("address"), field_path=f"[{i}].address", known_tokens=real_tokens, issues=issues, seen=seen)
+        for j, finding in enumerate(item.get("findings") or []):
+            for key, value in finding.items():
+                _scan_field(value, field_path=f"[{i}].findings[{j}].{key}", known_tokens=real_tokens, issues=issues, seen=seen)
+    return issues
+
+
+def leak_scan_hosts(sanitized_hosts: list[dict], known_tokens: list[tuple[str, str]]) -> list[dict]:
+    """Mesma lógica de `leak_scan`, pra hosts em vez de containers --
+    `address` no lugar de `image` (host não tem imagem), field paths
+    prefixados `hosts[i]` em vez de `containers[i]` pra não confundir
+    a origem de um issue reportado.
+    """
+    issues: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for i, host in enumerate(sanitized_hosts):
+        _scan_field(host.get("name"), field_path=f"hosts[{i}].name", known_tokens=known_tokens, issues=issues, seen=seen)
+        _scan_field(host.get("address"), field_path=f"hosts[{i}].address", known_tokens=known_tokens, issues=issues, seen=seen)
+        for j, finding in enumerate(host.get("findings") or []):
+            for key, value in finding.items():
+                _scan_field(
+                    value,
+                    field_path=f"hosts[{i}].findings[{j}].{key}",
                     known_tokens=known_tokens,
                     issues=issues,
                     seen=seen,

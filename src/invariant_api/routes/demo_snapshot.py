@@ -34,7 +34,7 @@ from pydantic import BaseModel
 from invariant_api.auth import require_admin_session
 from invariant_api.clients import assessment_client
 from invariant_api.demo_identities import get_or_assign_alias
-from invariant_api.demo_sanitize import known_real_identifiers, leak_scan
+from invariant_api.demo_sanitize import known_real_identifiers, leak_scan, redact_real_identity, verify_redaction
 from invariant_api.reports import ConsolidatedAsset, build_ceo_report, build_consolidated_report, build_technical_report
 from invariant_api.storage import postgres as db
 
@@ -54,11 +54,12 @@ class PublishRequest(BaseModel):
 
 def _sanitize_and_scan(
     conn, containers: list[RealContainerInput]
-) -> tuple[list[dict], list[dict], list[str], list[str]]:
+) -> tuple[list[dict], list[dict], list[str], list[str], list[dict]]:
     live_by_id = {c["id"]: c for c in assessment_client.list_containers()}
     sanitized = []
     unverified = []
     not_demo = []
+    all_replacements: list[tuple[str, str]] = []
     for c in containers:
         live = live_by_id.get(c.container_id)
         if live is None:
@@ -71,34 +72,37 @@ def _sanitize_and_scan(
             not_demo.append(c.container_id)
             continue
         alias_name, alias_image = get_or_assign_alias(conn, container_id=c.container_id)
-        sanitized.append(
-            {
-                "name": alias_name,
-                "image": alias_image,
-                "findings": [f.model_copy(update={"target": alias_name}).model_dump(mode="json") for f in c.findings],
-            }
-        )
+        # Substitui o nome/imagem reais em TODO campo de texto do
+        # finding, não só `target` -- sem isso, evidence_output podia
+        # citar o nome/imagem real do container por acaso, quebrando a
+        # coerência da identidade pública mostrada ao lado.
+        replacements = [(live["name"], alias_name), (live["image"], alias_image)]
+        all_replacements.extend(replacements)
+        redacted_findings = [redact_real_identity(f, replacements).model_dump(mode="json") for f in c.findings]
+        sanitized.append({"name": alias_name, "image": alias_image, "findings": redacted_findings})
     issues = leak_scan(sanitized, known_real_identifiers(conn))
-    return sanitized, issues, unverified, not_demo
+    redaction_issues = verify_redaction(sanitized, all_replacements)
+    return sanitized, issues, unverified, not_demo, redaction_issues
 
 
 @router.post("/preview", dependencies=[Depends(require_admin_session)])
 def preview(payload: PublishRequest) -> dict:
     with db.connect() as conn:
-        sanitized, issues, unverified, not_demo = _sanitize_and_scan(conn, payload.containers)
+        sanitized, issues, unverified, not_demo, redaction_issues = _sanitize_and_scan(conn, payload.containers)
     return {
-        "ok": not issues and not unverified and not not_demo,
+        "ok": not issues and not unverified and not not_demo and not redaction_issues,
         "containers": sanitized,
         "issues": issues,
         "unverified_container_ids": unverified,
         "not_demo_container_ids": not_demo,
+        "redaction_issues": redaction_issues,
     }
 
 
 @router.post("/publish", dependencies=[Depends(require_admin_session)])
 def publish(payload: PublishRequest) -> dict:
     with db.connect() as conn:
-        sanitized, issues, unverified, not_demo = _sanitize_and_scan(conn, payload.containers)
+        sanitized, issues, unverified, not_demo, redaction_issues = _sanitize_and_scan(conn, payload.containers)
         if issues or unverified or not_demo:
             raise HTTPException(
                 422,
@@ -111,6 +115,21 @@ def publish(payload: PublishRequest) -> dict:
                     "issues": issues,
                     "unverified_container_ids": unverified,
                     "not_demo_container_ids": not_demo,
+                },
+            )
+        if redaction_issues:
+            # Bug de sanitização, não vazamento de infra real -- mensagem
+            # e categoria distintas de propósito (ver
+            # demo_sanitize.verify_redaction).
+            raise HTTPException(
+                422,
+                {
+                    "message": (
+                        "Não foi possível publicar a demo: a própria sanitização falhou -- o "
+                        "nome/imagem real de um ativo do Demo Lab sobreviveu num campo do snapshot "
+                        "depois da substituição pelo alias."
+                    ),
+                    "redaction_issues": redaction_issues,
                 },
             )
         db.insert_demo_snapshot(conn, containers=sanitized)

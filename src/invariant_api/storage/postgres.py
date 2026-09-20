@@ -50,6 +50,12 @@ _INSERT_DEMO_ALIAS = (_QUERIES_DIR / "insert_demo_alias.sql").read_text()
 _INSERT_DEMO_SNAPSHOT = (_QUERIES_DIR / "insert_demo_snapshot.sql").read_text()
 _SELECT_ACTIVE_DEMO_SNAPSHOT = (_QUERIES_DIR / "select_active_demo_snapshot.sql").read_text()
 _REVOKE_ACTIVE_DEMO_SNAPSHOT = (_QUERIES_DIR / "revoke_active_demo_snapshot.sql").read_text()
+_GET_DEMO_HOST_ALIAS = (_QUERIES_DIR / "get_demo_host_alias.sql").read_text()
+_LIST_DEMO_HOST_ALIAS_LABELS = (_QUERIES_DIR / "list_demo_host_alias_labels.sql").read_text()
+_INSERT_DEMO_HOST_ALIAS = (_QUERIES_DIR / "insert_demo_host_alias.sql").read_text()
+_INSERT_DEMO_HOST_SNAPSHOT = (_QUERIES_DIR / "insert_demo_host_snapshot.sql").read_text()
+_SELECT_ACTIVE_DEMO_HOST_SNAPSHOT = (_QUERIES_DIR / "select_active_demo_host_snapshot.sql").read_text()
+_REVOKE_ACTIVE_DEMO_HOST_SNAPSHOT = (_QUERIES_DIR / "revoke_active_demo_host_snapshot.sql").read_text()
 
 
 def connect() -> psycopg.Connection:
@@ -486,4 +492,50 @@ def revoke_active_demo_snapshot(conn: psycopg.Connection) -> bool:
     qualquer jeito nesse caso)."""
     with conn.cursor() as cur:
         cur.execute(_REVOKE_ACTIVE_DEMO_SNAPSHOT)
+        return cur.fetchone() is not None
+
+
+def get_demo_host_alias(conn: psycopg.Connection, *, endpoint_id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(_GET_DEMO_HOST_ALIAS, {"endpoint_id": endpoint_id})
+        row = cur.fetchone()
+        if row is None:
+            return None
+        alias_label, alias_address = row
+        return {"alias_label": alias_label, "alias_address": alias_address}
+
+
+def list_demo_host_alias_labels(conn: psycopg.Connection) -> list[str]:
+    with conn.cursor() as cur:
+        cur.execute(_LIST_DEMO_HOST_ALIAS_LABELS)
+        return [label for (label,) in cur.fetchall()]
+
+
+def insert_demo_host_alias(conn: psycopg.Connection, *, endpoint_id: int, alias_label: str, alias_address: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_INSERT_DEMO_HOST_ALIAS, {"endpoint_id": endpoint_id, "alias_label": alias_label, "alias_address": alias_address})
+
+
+def insert_demo_host_snapshot(conn: psycopg.Connection, *, hosts: list[dict]) -> int:
+    with conn.cursor() as cur:
+        cur.execute(_INSERT_DEMO_HOST_SNAPSHOT, {"hosts": Jsonb(hosts)})
+        return cur.fetchone()[0]
+
+
+def select_active_demo_host_snapshot(conn: psycopg.Connection) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_ACTIVE_DEMO_HOST_SNAPSHOT)
+        row = cur.fetchone()
+        if row is None:
+            return None
+        id, hosts, created_at = row
+        return {"id": id, "hosts": hosts, "created_at": created_at}
+
+
+def revoke_active_demo_host_snapshot(conn: psycopg.Connection) -> bool:
+    """Mesma semântica de revoke_active_demo_snapshot -- True se havia
+    um snapshot de hosts ativo e foi revogado, False se não havia
+    nenhum."""
+    with conn.cursor() as cur:
+        cur.execute(_REVOKE_ACTIVE_DEMO_HOST_SNAPSHOT)
         return cur.fetchone() is not None
