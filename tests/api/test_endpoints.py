@@ -24,12 +24,14 @@ def clean_tables():
     except (KeyError, psycopg.OperationalError) as exc:
         pytest.skip(f"no reachable DATABASE_URL configured: {exc}")
     with conn.cursor() as cur:
+        cur.execute("DELETE FROM assessment_summaries")
         cur.execute("DELETE FROM discovery_results")
         cur.execute("DELETE FROM endpoints")
         cur.execute("DELETE FROM admin_users")
     conn.commit()
     yield
     with conn.cursor() as cur:
+        cur.execute("DELETE FROM assessment_summaries")
         cur.execute("DELETE FROM discovery_results")
         cur.execute("DELETE FROM endpoints")
         cur.execute("DELETE FROM admin_users")
@@ -410,6 +412,179 @@ def test_assess_discovered_endpoint_requires_auth():
     assert response.status_code == 401
 
 
+# --- assessment_summaries: lightweight persisted resumo, GET /endpoints
+# reflecting it -- ver invariant_api.reports.split_findings()/
+# compliance_pct(), reaproveitadas aqui, não reimplementadas. Um run com
+# 5 controles distintos, cada um provocando um bucket diferente:
+# Control A (PASS) -> applicable_pass; Control B (FAIL) -> applicable_fail;
+# Control C (FAIL, evidence carrega o sentinel "sshd ausente") -> também
+# applicable_fail (seu próprio (doc,id) não está em SSHD_DEPENDENT_CONTROLS),
+# mas faz ssh_state() virar "absent" pro restante do batch; Control D
+# ((debian_linux_12, 5.1.1), um dos pares reais em SSHD_DEPENDENT_CONTROLS)
+# -> not_applicable, já que sshd está "absent"; Control E (status "MANUAL",
+# fora do domínio PASS/FAIL -- Finding.status é str livre, sem Literal, então
+# isso nem precisa de bypass de validação) -> not_assessed.
+
+_SSH_ABSENT_SENTINEL = "<sshd-not-installed>"
+
+_MULTI_FAKE_RUN = {
+    "document": "debian_linux_12",
+    "results": [
+        {"titles": ["Control A - Pass"], "status": "PASS", "evidence": "ok"},
+        {"titles": ["Control B - Fail"], "status": "FAIL", "evidence": "bad"},
+        {"titles": ["Control C - SSH probe"], "status": "FAIL", "evidence": _SSH_ABSENT_SENTINEL},
+        {"titles": ["Control D - SSH dependent"], "status": "FAIL", "evidence": "sshd_config: PermitRootLogin yes"},
+        {"titles": ["Control E - Manual"], "status": "MANUAL", "evidence": "n/a"},
+    ],
+}
+
+_MULTI_FAKE_CONTROLS_BY_TITLE = {
+    "Control A - Pass": {**_FAKE_CONTROL, "external_id": "9.9.1", "title": "Control A - Pass", "document_name": "debian_linux_12"},
+    "Control B - Fail": {**_FAKE_CONTROL, "external_id": "9.9.2", "title": "Control B - Fail", "document_name": "debian_linux_12"},
+    "Control C - SSH probe": {**_FAKE_CONTROL, "external_id": "9.9.3", "title": "Control C - SSH probe", "document_name": "debian_linux_12"},
+    # (debian_linux_12, 5.1.1) is a real entry in finding_taxonomy.SSHD_DEPENDENT_CONTROLS.
+    "Control D - SSH dependent": {**_FAKE_CONTROL, "external_id": "5.1.1", "title": "Control D - SSH dependent", "document_name": "debian_linux_12"},
+    "Control E - Manual": {**_FAKE_CONTROL, "external_id": "9.9.5", "title": "Control E - Manual", "document_name": "debian_linux_12"},
+}
+
+
+def _fake_select_control_by_title(conn, *, document, titles):
+    return _MULTI_FAKE_CONTROLS_BY_TITLE[titles[0]]
+
+
+def _run_multi_assess(session_client, monkeypatch, endpoint_id):
+    monkeypatch.setattr(assessment_client, "run_assessment_remote", lambda **kwargs: _MULTI_FAKE_RUN)
+    monkeypatch.setattr(db, "select_control_by_title", _fake_select_control_by_title)
+    return session_client.post(
+        f"/endpoints/{endpoint_id}/assess",
+        json={"username": "root", "auth_method": "password", "password": "hunter2"},
+    )
+
+
+def test_assess_persists_summary_and_it_shows_in_list(session_client, monkeypatch):
+    endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
+    _discover_endpoint(session_client, monkeypatch, endpoint_id)
+
+    response = _run_multi_assess(session_client, monkeypatch, endpoint_id)
+    assert response.status_code == 200
+    # response contract unchanged -- still exactly list[Finding], no new field.
+    assert len(response.json()) == 5
+
+    listed = session_client.get("/endpoints").json()
+    endpoint = next(e for e in listed if e["id"] == endpoint_id)
+    assert endpoint["last_assessment_target_type"] == "linux_host"
+    assert endpoint["last_assessment_pass_count"] == 1
+    assert endpoint["last_assessment_fail_count"] == 2
+    assert endpoint["last_assessment_not_assessed_count"] == 1
+    assert endpoint["last_assessment_not_applicable_count"] == 1
+    assert endpoint["last_assessment_compliance_pct"] == 33  # round(100 * 1/3)
+    assert endpoint["last_assessed_at"] is not None
+
+
+def test_assess_never_run_returns_null_summary_fields(session_client):
+    endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
+
+    listed = session_client.get("/endpoints").json()
+    endpoint = next(e for e in listed if e["id"] == endpoint_id)
+    for field in (
+        "last_assessment_target_type",
+        "last_assessment_pass_count",
+        "last_assessment_fail_count",
+        "last_assessment_not_assessed_count",
+        "last_assessment_not_applicable_count",
+        "last_assessment_compliance_pct",
+        "last_assessed_at",
+    ):
+        assert endpoint[field] is None
+
+
+def test_assess_twice_keeps_history_and_list_surfaces_latest(session_client, monkeypatch):
+    endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
+    _discover_endpoint(session_client, monkeypatch, endpoint_id)
+
+    # First run: single-control fake (_FAKE_RUN), 1 FAIL, 0 PASS.
+    monkeypatch.setattr(assessment_client, "run_assessment_remote", lambda **kwargs: _FAKE_RUN)
+    monkeypatch.setattr(db, "select_control_by_title", lambda conn, *, document, titles: _FAKE_CONTROL)
+    first = session_client.post(
+        f"/endpoints/{endpoint_id}/assess",
+        json={"username": "root", "auth_method": "password", "password": "hunter2"},
+    )
+    assert first.status_code == 200
+
+    # Second run: the 5-control multi-fake -- different composition entirely.
+    second = _run_multi_assess(session_client, monkeypatch, endpoint_id)
+    assert second.status_code == 200
+
+    listed = session_client.get("/endpoints").json()
+    endpoint = next(e for e in listed if e["id"] == endpoint_id)
+    # Only the second (latest) run's counts are surfaced.
+    assert endpoint["last_assessment_pass_count"] == 1
+    assert endpoint["last_assessment_fail_count"] == 2
+
+    conn = db.connect()
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM assessment_summaries WHERE endpoint_id = %(id)s", {"id": endpoint_id})
+        count = cur.fetchone()[0]
+    conn.close()
+    assert count == 2  # append-only history, never an upsert
+
+
+def test_assess_failure_does_not_erase_last_valid_summary(session_client, monkeypatch):
+    endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
+    _discover_endpoint(session_client, monkeypatch, endpoint_id)
+
+    ok = _run_multi_assess(session_client, monkeypatch, endpoint_id)
+    assert ok.status_code == 200
+
+    def boom(**kwargs):
+        request = httpx.Request("POST", "http://assessment:8000/assessment/run-remote")
+        response = httpx.Response(401, request=request, text="bad SSH credentials")
+        raise httpx.HTTPStatusError("401", request=request, response=response)
+
+    monkeypatch.setattr(assessment_client, "run_assessment_remote", boom)
+    failed = session_client.post(
+        f"/endpoints/{endpoint_id}/assess",
+        json={"username": "root", "auth_method": "password", "password": "wrong"},
+    )
+    assert failed.status_code == 401
+
+    listed = session_client.get("/endpoints").json()
+    endpoint = next(e for e in listed if e["id"] == endpoint_id)
+    assert endpoint["last_assessment_pass_count"] == 1
+    assert endpoint["last_assessment_fail_count"] == 2
+
+    conn = db.connect()
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM assessment_summaries WHERE endpoint_id = %(id)s", {"id": endpoint_id})
+        count = cur.fetchone()[0]
+    conn.close()
+    assert count == 1  # the failed attempt never inserted a row
+
+
+def test_assessment_summary_never_stores_finding_evidence_or_titles(session_client, monkeypatch):
+    endpoint_id = session_client.post("/endpoints", json={"address": "10.0.0.5"}).json()["id"]
+    _discover_endpoint(session_client, monkeypatch, endpoint_id)
+
+    marker = "SUPER-SECRET-EVIDENCE-MARKER-XYZ"
+    marked_run = {
+        "document": "debian_linux_12",
+        "results": [{"titles": [marker], "status": "FAIL", "evidence": marker}],
+    }
+    marked_control = {**_FAKE_CONTROL, "title": marker, "normalized_data": {**_FAKE_CONTROL["normalized_data"], "remediation": marker}}
+    monkeypatch.setattr(assessment_client, "run_assessment_remote", lambda **kwargs: marked_run)
+    monkeypatch.setattr(db, "select_control_by_title", lambda conn, *, document, titles: marked_control)
+
+    response = session_client.post(
+        f"/endpoints/{endpoint_id}/assess",
+        json={"username": "root", "auth_method": "password", "password": "hunter2"},
+    )
+    assert response.status_code == 200
+
+    conn = db.connect()
+    _assert_marker_absent_from_table(conn, "assessment_summaries", marker)
+    conn.close()
+
+
 # --- POST /endpoints/{id}/check (SSH pre-flight, mirrors GET /containers/{name}/check) ---
 
 
@@ -517,6 +692,7 @@ def test_submitted_credentials_never_persisted_to_db(session_client, monkeypatch
     conn = db.connect()
     _assert_marker_absent_from_table(conn, "endpoints", marker)
     _assert_marker_absent_from_table(conn, "discovery_results", marker)
+    _assert_marker_absent_from_table(conn, "assessment_summaries", marker)
     conn.close()
 
 

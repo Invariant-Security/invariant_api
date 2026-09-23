@@ -19,19 +19,26 @@ from typing import Literal
 
 import httpx
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from invariant_contracts import DiscoveryResult, Endpoint, Finding
 from pydantic import BaseModel, Field
 
 from invariant_api.auth import require_admin_session
 from invariant_api.clients import assessment_client, discovery_client
 from invariant_api.demo_sanitize import is_demo_endpoint
+from invariant_api.reports import compliance_pct, split_findings
 from invariant_api.routes.assess import _findings_from_run
 from invariant_api.storage import postgres as db
 
 router = APIRouter(prefix="/endpoints", dependencies=[Depends(require_admin_session)])
 
 logger = logging.getLogger(__name__)
+
+# Mesmo valor de demo_host_snapshot.py's _NO_STORE_HEADERS -- constante
+# local de propósito (nome privado de outro módulo de rota não é
+# importado entre eles), só pra GET /endpoints (ver seu próprio
+# docstring).
+_NO_STORE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
 
 # Teto simples pra evitar um arquivo gigante virando milhares de inserts
 # numa chamada só -- também barra abuso acidental na demo. O tamanho do
@@ -143,13 +150,20 @@ def create_endpoints_bulk(payload: list[BulkEndpointInput]) -> list[BulkEndpoint
 
 
 @router.get("")
-def list_endpoints() -> list[dict]:
+def list_endpoints(response: Response) -> list[dict]:
     """`is_demo` mesmo padrão de `GET /api/containers` -- só exibição/
     agrupamento no frontend ("Ambiente demonstrativo"/"Ambiente
     operacional"). O critério real de elegibilidade pra publicação
     pública é sempre reconferido ao vivo em routes/demo_host_snapshot.py,
     nunca confiado a partir deste campo.
+
+    `Cache-Control: no-store` -- essa lista muda a cada Descobrir/
+    Executar avaliação, e o console admin depende de um reload/refetch
+    sempre trazer o estado real, nunca uma resposta em cache do
+    navegador/proxy mostrando um endpoint como "nunca avaliado" que já
+    foi.
     """
+    response.headers.update(_NO_STORE_HEADERS)
     conn = db.connect()
     endpoints = db.select_endpoints(conn)
     conn.close()
@@ -280,7 +294,39 @@ def assess_discovered_endpoint(endpoint_id: int, credentials: SSHCredentials) ->
     except httpx.HTTPStatusError as e:
         raise HTTPException(e.response.status_code, e.response.text) from e
 
-    return _findings_from_run(endpoint["address"], run, target_type="linux_host")
+    findings = _findings_from_run(endpoint["address"], run, target_type="linux_host")
+
+    # Resumo leve, persistido como efeito colateral -- nunca as Findings
+    # em si (evidence_output, achado por achado, credenciais continuam
+    # 100% efêmeras). Reaproveita split_findings()/compliance_pct()
+    # (mesma taxonomia já usada nos relatórios PDF), não uma contagem
+    # PASS/FAIL reinventada aqui. Conexão nova e curta, separada da
+    # chamada SSH acima (a conexão original já foi fechada de propósito
+    # antes do SSH -- não reabrir esse padrão). Uma falha ao persistir
+    # nunca deve derrubar uma avaliação que já rodou com sucesso.
+    applicable_pass, applicable_fail, not_assessed, not_applicable = split_findings(findings)
+    summary_conn = None
+    try:
+        summary_conn = db.connect()
+        db.insert_assessment_summary(
+            summary_conn,
+            endpoint_id=endpoint_id,
+            target_type="linux_host",
+            pass_count=len(applicable_pass),
+            fail_count=len(applicable_fail),
+            not_assessed_count=len(not_assessed),
+            not_applicable_count=len(not_applicable),
+            compliance_pct=compliance_pct(applicable_pass, applicable_fail),
+            assessed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        summary_conn.commit()
+    except Exception:
+        logger.exception("failed to persist assessment summary for endpoint %s", endpoint_id)
+    finally:
+        if summary_conn is not None:
+            summary_conn.close()
+
+    return findings
 
 
 @router.post("/{endpoint_id}/check")
