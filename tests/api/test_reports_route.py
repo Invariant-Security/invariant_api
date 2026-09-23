@@ -1,12 +1,17 @@
 """No mocking needed -- reports.py's builders are pure functions, so this
 exercises the real thing end-to-end through the HTTP layer.
+
+Guarded by require_admin_session (cookie-only check, no Postgres) --
+see test_assess.py's docstring for why tests set the cookie directly.
 """
 
 from fastapi.testclient import TestClient
 
 from invariant_api import main
+from invariant_api.auth import create_session_cookie
 
 client = TestClient(main.app)
+client.cookies.set("invariant_session", create_session_cookie("admin"))
 
 _FINDING = {
     "target": "tamois",
@@ -77,3 +82,11 @@ def test_consolidated_report_with_no_assets_still_returns_a_pdf():
 
     assert response.status_code == 200
     assert response.content.startswith(b"%PDF-")
+
+
+def test_reports_pdf_requires_admin_session():
+    anonymous = TestClient(main.app)
+
+    response = anonymous.post("/reports/pdf", json={"title": "tamois", "kind": "ceo", "findings": [_FINDING]})
+
+    assert response.status_code == 401

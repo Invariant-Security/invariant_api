@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from invariant_api.config import load_dotenv
-from invariant_api.routes import assess, auth, billing, demo, endpoints, ingest, leads, newsletter, reports
+from invariant_api.routes import assess, auth, billing, demo, demo_host_snapshot, demo_snapshot, endpoints, ingest, leads, newsletter, reports
 
 load_dotenv()
 
@@ -53,3 +53,5 @@ app.include_router(auth.router)
 app.include_router(endpoints.router)
 app.include_router(reports.router)
 app.include_router(leads.router)
+app.include_router(demo_snapshot.router)
+app.include_router(demo_host_snapshot.router)

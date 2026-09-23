@@ -5,18 +5,24 @@ route does the join. This is the exact body of the monolith's
 assess_target()'s `for check in CHECKS` loop, moved here unchanged --
 only its inputs changed (a list of {titles, status, evidence} dicts from
 an HTTP call instead of iterating CHECKS/facts directly).
+
+Guardado por require_admin_session -- estas rotas rodam docker exec de
+verdade contra containers reais deste host (issue #3, corrigida agora
+que /containers também é ponto de entrada da demo pública: visitante
+nunca pode chegar aqui, só no /demo-snapshot já sanitizado).
 """
 
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from invariant_contracts import Finding
 
+from invariant_api.auth import require_admin_session
 from invariant_api.clients import assessment_client
 from invariant_api.storage import postgres as db
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin_session)])
 
 
 def _control_level(normalized_data: dict) -> int | None:
@@ -88,8 +94,7 @@ def list_containers() -> list[dict]:
     """Candidates for POST /assess/{target} -- every container on this
     host, minus invariant's own stack (appliance/demo/infra, not a client
     asset -- the "invariant-" prefix is a naming convention this project
-    controls, not a guess). No auth, same intentional decision as the
-    rest of this module for this phase of the project.
+    controls, not a guess).
     """
     containers = assessment_client.list_containers()
     return [c for c in containers if not c["name"].startswith("invariant-")]

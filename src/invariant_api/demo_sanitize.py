@@ -1,0 +1,271 @@
+"""Leak scan pra publicação da demo pública (routes/demo_snapshot.py) --
+compara o snapshot já sanitizado (nomes/imagens já trocados pelo alias)
+contra uma lista de identificadores REAIS conhecidos pelo próprio
+sistema, não um detector genérico de PII/segredo (isso seria complexo e
+pouco confiável pro problema real, que é vazar nome/imagem/endereço do
+ambiente do Victor, não qualquer string sensível em abstrato).
+
+Desde a introdução do Invariant Demo Lab (containers construídos
+especificamente pra demonstração, dado fictício desde a origem, ver
+demo_lab/), isto deixou de ser a fronteira principal de segurança --
+essa fronteira agora é o label `invariant.public-demo=true`, checado em
+routes/demo_snapshot.py antes de qualquer coisa chegar aqui. Este scan
+continua ativo como defesa em profundidade contra bug/erro operacional
+(ex.: um `container_id` real vazando por engano), não como política pra
+tentar adivinhar se um caminho de arquivo é "seguro" -- dentro do Demo
+Lab, todo caminho já é seguro por construção.
+
+Termos genéricos de infra (postgres, nginx, redis, frontend, backend,
+versões...) são explicitamente filtrados antes de entrar na lista de
+identificadores conhecidos -- eles aparecem tanto no snapshot fictício
+quanto em evidence legítima do CIS, e tratá-los como sensíveis geraria
+falso positivo constante, bloqueando publicações que não vazam nada de
+verdade.
+"""
+
+import ipaddress
+import re
+import socket
+
+import psycopg
+from invariant_contracts import Finding
+
+from invariant_api.clients import assessment_client
+from invariant_api.storage import postgres as db
+
+# Faixa reservada e isolada da LXD pro Demo Lab de Hosts Linux (ver
+# demo_lab/docs/networking.md) -- o equivalente, pra hosts, do label
+# Docker `invariant.public-demo=true` dos containers: um fato de
+# infraestrutura verificado ao vivo a cada preview/publish, nunca uma
+# coluna gravável só pelo painel admin.
+_DEMO_LAB_HOSTS_NETWORK = ipaddress.ip_network("10.89.77.0/24")
+
+
+def is_demo_endpoint(address: str) -> bool:
+    """True só se `address` for um único IP (não uma faixa/CIDR) dentro
+    da rede reservada do Demo Lab de Hosts. Entrada inválida ou uma
+    faixa (`endpoints.address` já aceita CIDR hoje) sempre vira False,
+    nunca uma exceção -- nunca deveria derrubar /preview ou /publish.
+    """
+    try:
+        return ipaddress.ip_address(address) in _DEMO_LAB_HOSTS_NETWORK
+    except ValueError:
+        return False
+
+
+_GENERIC_IMAGE_TERMS = {
+    "postgres", "postgresql", "nginx", "redis", "mysql", "mariadb", "mongo", "mongodb",
+    "frontend", "backend", "web", "api", "app", "worker", "cache", "gateway", "service",
+    "db", "queue", "job", "edge", "proxy", "alpine", "slim", "bullseye", "bookworm",
+    "debian", "ubuntu", "centos", "fedora", "node", "python", "golang", "java",
+    "ghcr.io", "docker.io", "index.docker.io", "quay.io", "library", "latest",
+    # Docker reports a dangling/untagged image as "sha256:<digest>" instead
+    # of a repo:tag -- splitting that on "/:" leaves the bare algorithm
+    # name as its own token. Found live: three real Postgres containers
+    # (liliankaliaki/babybet) report exactly this, and "sha256" alone then
+    # false-positived against completely unrelated evidence that happens to
+    # mention "sha256" -- e.g. sshd's KexAlgorithms list, TLS cipher names,
+    # file checksums. The digest itself is still kept as a token (a random
+    # 64-hex-char string is not going to collide by accident).
+    "sha256", "sha384", "sha512", "sha1", "md5",
+}
+_VERSION_RE = re.compile(r"^v?\d+(\.\d+){0,3}([-.].+)?$")
+_MIN_TOKEN_LENGTH = 4
+
+# Exceção documentada e deliberada: não vem de nenhuma tabela do banco
+# (não há de onde derivar isso do estado do sistema) -- são domínios e
+# nomes de projeto reais conhecidos desta VPS, mantidos aqui à mão.
+_KNOWN_INTERNAL_DOMAINS = [
+    "invariantsec.org",
+    "forjadosdias.tech",
+    "forjadosdias.com.br",
+    "victordg.dev.br",
+    "tamois.com.br",
+    "aprovadonaoab.com.br",
+]
+_KNOWN_PROJECT_NAMES = ["tamois", "estudeoab", "amanuense", "naoesqueci", "liliankaliaki", "babybet"]
+
+
+def _distinctive_image_tokens(image: str) -> list[str]:
+    """Só os pedaços do path da imagem que não são vocabulário genérico
+    de infra nem parecem número de versão -- de
+    "ghcr.io/tamois-ia-juridica/tamois:v1", só "tamois-ia-juridica" e
+    "tamois" sobrevivem (ghcr.io é registry genérico, v1 é versão).
+    """
+    tokens = re.split(r"[/:]+", image)
+    out = []
+    for raw in tokens:
+        t = raw.strip().lower()
+        if len(t) < _MIN_TOKEN_LENGTH or t in _GENERIC_IMAGE_TERMS or _VERSION_RE.match(t):
+            continue
+        out.append(raw)
+    return out
+
+
+def known_real_identifiers(conn: psycopg.Connection) -> list[tuple[str, str]]:
+    """[(token, categoria)] -- identificadores distintivos do ambiente
+    real (não-demo) atual. Recalculado a cada preview/publish, nunca
+    cacheado -- um container pode ter sido criado/removido desde a
+    última chamada.
+
+    Containers com o label `invariant.public-demo=true` (Invariant Demo
+    Lab) são pulados de propósito -- são seguros de expor por
+    definição, então não faz sentido tratá-los como "identificador a
+    proteger" (isso também evita colisão de um container demo contra o
+    alias fictício de outro container demo). Endpoints dentro da faixa
+    reservada do Demo Lab de Hosts (`is_demo_endpoint`) são pulados
+    pelo mesmo motivo.
+    """
+    tokens: list[tuple[str, str]] = []
+
+    for c in assessment_client.list_containers():
+        if c.get("is_demo"):
+            continue
+        tokens.append((c["name"], "container_name"))
+        distinctive = _distinctive_image_tokens(c["image"])
+        # A string completa da imagem só entra como identificador
+        # conhecido se ela tiver pelo menos um pedaço distintivo (não
+        # genérico/versão) -- senão uma imagem 100% genérica (ex.:
+        # "postgres:16", usada pelo próprio Postgres do Invariant, não
+        # de um cliente) vira falso positivo contra qualquer alias
+        # fictício com versão parecida (ex.: ".../postgres:16.2" bate
+        # substring com "postgres:16"). Confirmado com um vazamento
+        # falso real durante teste em teste.invariantsec.org.
+        if distinctive:
+            tokens.append((c["image"], "container_image"))
+            for t in distinctive:
+                tokens.append((t, "container_image_org"))
+
+    for e in db.select_endpoints(conn):
+        if is_demo_endpoint(e["address"]):
+            continue
+        tokens.append((e["address"], "endpoint_address"))
+        label = e.get("label")
+        if label and len(label) >= _MIN_TOKEN_LENGTH and label.lower() not in _GENERIC_IMAGE_TERMS:
+            tokens.append((label, "endpoint_label"))
+
+    tokens.append((socket.gethostname(), "hostname"))
+    tokens += [(d, "internal_domain") for d in _KNOWN_INTERNAL_DOMAINS]
+    tokens += [(p, "known_project_name") for p in _KNOWN_PROJECT_NAMES]
+
+    return [(t, cat) for t, cat in tokens if t and len(t) >= _MIN_TOKEN_LENGTH]
+
+
+_REDACTABLE_FINDING_FIELDS = ("target", "evidence_output", "remediation", "raw_artifact_path")
+
+
+def redact_real_identity(finding: Finding, replacements: list[tuple[str, str]]) -> Finding:
+    """Substitui toda ocorrência de um identificador real (nome/imagem
+    de container, endereço/label de host) pelo alias correspondente,
+    em TODO campo de texto do finding -- não só `target`. Sem isso, um
+    card público podia mostrar o alias (`web-prod-03.internal`)
+    enquanto a evidência do mesmo finding cita o nome/IP real do ativo
+    do Demo Lab (`demo-host-web-01`/`10.89.77.11`) -- não é um dado
+    sensível (o Demo Lab é seguro por construção), mas quebra a
+    coerência da identidade pública apresentada.
+
+    `replacements` é reordenado do mais longo pro mais curto antes de
+    aplicar -- evita substituição parcial indevida quando um valor é
+    substring de outro (ex.: um label curto que por acaso aparece
+    dentro de um endereço mais longo).
+    """
+    replacements = sorted(replacements, key=lambda pair: len(pair[0]), reverse=True)
+    updates = {}
+    for field in _REDACTABLE_FINDING_FIELDS:
+        value = getattr(finding, field)
+        if not isinstance(value, str):
+            continue  # raw_artifact_path etc. podem vir None -- nunca assumir str
+        for real, alias in replacements:
+            if real and real in value:
+                value = value.replace(real, alias)
+        updates[field] = value
+    return finding.model_copy(update=updates)
+
+
+def _scan_field(value, *, field_path: str, known_tokens: list[tuple[str, str]], issues: list[dict], seen: set[tuple[str, str]]) -> None:
+    if not isinstance(value, str) or not value:
+        return
+    lowered = value.lower()
+    for token, category in known_tokens:
+        key = (field_path, category)
+        if key in seen:
+            continue
+        if token.lower() in lowered:
+            seen.add(key)
+            issues.append({"field": field_path, "category": category})
+
+
+def leak_scan(sanitized_containers: list[dict], known_tokens: list[tuple[str, str]]) -> list[dict]:
+    """Navega o snapshot já sanitizado campo a campo (não uma busca numa
+    string gigante só) pra poder apontar ONDE cada identificador real
+    apareceu -- cobre nome/imagem do container e todo campo de texto de
+    cada finding (evidence_output, remediation, raw_artifact_path,
+    etc). Retorna [] se limpo; senão, uma entrada por (campo, categoria)
+    batida, sem ecoar o valor real batido de volta -- só o suficiente
+    pro admin achar e corrigir.
+    """
+    issues: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for i, container in enumerate(sanitized_containers):
+        _scan_field(container.get("name"), field_path=f"containers[{i}].name", known_tokens=known_tokens, issues=issues, seen=seen)
+        _scan_field(container.get("image"), field_path=f"containers[{i}].image", known_tokens=known_tokens, issues=issues, seen=seen)
+        for j, finding in enumerate(container.get("findings") or []):
+            for key, value in finding.items():
+                _scan_field(
+                    value,
+                    field_path=f"containers[{i}].findings[{j}].{key}",
+                    known_tokens=known_tokens,
+                    issues=issues,
+                    seen=seen,
+                )
+    return issues
+
+
+def verify_redaction(sanitized_items: list[dict], replacements: list[tuple[str, str]]) -> list[dict]:
+    """Confere que nenhum valor real usado em `redact_real_identity`
+    sobreviveu no item já sanitizado -- diferente do `leak_scan`
+    (que procura identificadores de infraestrutura real não-demo,
+    deliberadamente NUNCA incluindo ativos do Demo Lab no seu corpus),
+    isto aqui verifica a própria substituição: o dado do Demo Lab não é
+    sensível, mas um card público mostrando `web-prod-03.internal`
+    numa linha e `demo-host-web-01`/`10.89.77.11` na evidência ao lado
+    quebraria a coerência da identidade pública apresentada. Uma
+    ocorrência aqui é sempre bug de redaction (a lista de
+    `replacements` está incompleta), não vazamento de dado sensível --
+    reportado com a categoria `redaction_incomplete` pra não ser
+    confundido com um achado do `leak_scan`.
+    """
+    real_tokens = [(real, "redaction_incomplete") for real, _alias in replacements if real]
+    issues: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for i, item in enumerate(sanitized_items):
+        _scan_field(item.get("name"), field_path=f"[{i}].name", known_tokens=real_tokens, issues=issues, seen=seen)
+        _scan_field(item.get("image"), field_path=f"[{i}].image", known_tokens=real_tokens, issues=issues, seen=seen)
+        _scan_field(item.get("address"), field_path=f"[{i}].address", known_tokens=real_tokens, issues=issues, seen=seen)
+        for j, finding in enumerate(item.get("findings") or []):
+            for key, value in finding.items():
+                _scan_field(value, field_path=f"[{i}].findings[{j}].{key}", known_tokens=real_tokens, issues=issues, seen=seen)
+    return issues
+
+
+def leak_scan_hosts(sanitized_hosts: list[dict], known_tokens: list[tuple[str, str]]) -> list[dict]:
+    """Mesma lógica de `leak_scan`, pra hosts em vez de containers --
+    `address` no lugar de `image` (host não tem imagem), field paths
+    prefixados `hosts[i]` em vez de `containers[i]` pra não confundir
+    a origem de um issue reportado.
+    """
+    issues: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for i, host in enumerate(sanitized_hosts):
+        _scan_field(host.get("name"), field_path=f"hosts[{i}].name", known_tokens=known_tokens, issues=issues, seen=seen)
+        _scan_field(host.get("address"), field_path=f"hosts[{i}].address", known_tokens=known_tokens, issues=issues, seen=seen)
+        for j, finding in enumerate(host.get("findings") or []):
+            for key, value in finding.items():
+                _scan_field(
+                    value,
+                    field_path=f"hosts[{i}].findings[{j}].{key}",
+                    known_tokens=known_tokens,
+                    issues=issues,
+                    seen=seen,
+                )
+    return issues

@@ -1,13 +1,18 @@
 """Mocks assessment_client.list_containers entirely -- no real
 invariant_assessment service or Docker socket needed to run these.
+
+Guarded by require_admin_session (cookie-only check, no Postgres) --
+see test_assess.py's docstring for why tests set the cookie directly.
 """
 
 from fastapi.testclient import TestClient
 
 from invariant_api import main
+from invariant_api.auth import create_session_cookie
 from invariant_api.routes import assess
 
 client = TestClient(main.app)
+client.cookies.set("invariant_session", create_session_cookie("admin"))
 
 
 def test_filters_out_invariants_own_containers(monkeypatch):
@@ -73,3 +78,11 @@ def test_check_container_upstream_error_propagates_status(monkeypatch):
     response = client.get("/containers/tamois/check")
 
     assert response.status_code == 502
+
+
+def test_containers_requires_admin_session():
+    anonymous = TestClient(main.app)
+
+    response = anonymous.get("/containers")
+
+    assert response.status_code == 401
