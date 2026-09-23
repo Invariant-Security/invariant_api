@@ -42,6 +42,10 @@ _INSERT_DISCOVERY_RESULT = (_QUERIES_DIR / "insert_discovery_result.sql").read_t
 _SELECT_LATEST_DISCOVERY_RESULTS_BY_ENDPOINT = (
     _QUERIES_DIR / "select_latest_discovery_results_by_endpoint.sql"
 ).read_text()
+_INSERT_ASSESSMENT_SUMMARY = (_QUERIES_DIR / "insert_assessment_summary.sql").read_text()
+_SELECT_LATEST_ASSESSMENT_SUMMARY_BY_ENDPOINT = (
+    _QUERIES_DIR / "select_latest_assessment_summary_by_endpoint.sql"
+).read_text()
 _INSERT_LEAD = (_QUERIES_DIR / "insert_lead.sql").read_text()
 _UPDATE_LEAD_SLACK_RESULT = (_QUERIES_DIR / "update_lead_slack_result.sql").read_text()
 _GET_DEMO_ALIAS = (_QUERIES_DIR / "get_demo_alias.sql").read_text()
@@ -307,8 +311,9 @@ def insert_endpoint(
 
 def select_endpoints(conn: psycopg.Connection) -> list[dict]:
     """Um endpoint por linha, já com a classificação mais recente (ou None
-    se nenhuma rodada de discovery rodou pra ele ainda) -- ver o JOIN
-    LATERAL em select_endpoints.sql.
+    se nenhuma rodada de discovery rodou pra ele ainda) e o resumo da
+    avaliação mais recente (ou None se nenhuma rodada de assess rodou
+    pra ele ainda) -- ver os dois JOIN LATERAL em select_endpoints.sql.
     """
     with conn.cursor() as cur:
         cur.execute(_SELECT_ENDPOINTS)
@@ -322,8 +327,20 @@ def select_endpoints(conn: psycopg.Connection) -> list[dict]:
                 "classification": classification,
                 "confidence": confidence,
                 "scanned_at": scanned_at,
+                "last_assessment_target_type": last_assessment_target_type,
+                "last_assessment_pass_count": last_assessment_pass_count,
+                "last_assessment_fail_count": last_assessment_fail_count,
+                "last_assessment_not_assessed_count": last_assessment_not_assessed_count,
+                "last_assessment_not_applicable_count": last_assessment_not_applicable_count,
+                "last_assessment_compliance_pct": last_assessment_compliance_pct,
+                "last_assessed_at": last_assessed_at,
             }
-            for id, address, label, tags, created_at, classification, confidence, scanned_at in cur.fetchall()
+            for (
+                id, address, label, tags, created_at, classification, confidence, scanned_at,
+                last_assessment_target_type, last_assessment_pass_count, last_assessment_fail_count,
+                last_assessment_not_assessed_count, last_assessment_not_applicable_count,
+                last_assessment_compliance_pct, last_assessed_at,
+            ) in cur.fetchall()
         ]
 
 
@@ -381,6 +398,53 @@ def select_latest_discovery_results_by_endpoint(conn: psycopg.Connection, *, end
             }
             for ip, classification, confidence, evidence, scanned_at in cur.fetchall()
         ]
+
+
+def insert_assessment_summary(
+    conn: psycopg.Connection,
+    *,
+    endpoint_id: int,
+    target_type: str,
+    pass_count: int,
+    fail_count: int,
+    not_assessed_count: int,
+    not_applicable_count: int,
+    compliance_pct: int | None,
+    assessed_at: str,
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            _INSERT_ASSESSMENT_SUMMARY,
+            {
+                "endpoint_id": endpoint_id,
+                "target_type": target_type,
+                "pass_count": pass_count,
+                "fail_count": fail_count,
+                "not_assessed_count": not_assessed_count,
+                "not_applicable_count": not_applicable_count,
+                "compliance_pct": compliance_pct,
+                "assessed_at": assessed_at,
+            },
+        )
+        return cur.fetchone()[0]
+
+
+def select_latest_assessment_summary_by_endpoint(conn: psycopg.Connection, *, endpoint_id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_LATEST_ASSESSMENT_SUMMARY_BY_ENDPOINT, {"endpoint_id": endpoint_id})
+        row = cur.fetchone()
+        if row is None:
+            return None
+        target_type, pass_count, fail_count, not_assessed_count, not_applicable_count, compliance_pct, assessed_at = row
+        return {
+            "target_type": target_type,
+            "pass_count": pass_count,
+            "fail_count": fail_count,
+            "not_assessed_count": not_assessed_count,
+            "not_applicable_count": not_applicable_count,
+            "compliance_pct": compliance_pct,
+            "assessed_at": assessed_at,
+        }
 
 
 def select_contract_by_id(conn: psycopg.Connection, *, id: int) -> dict | None:
