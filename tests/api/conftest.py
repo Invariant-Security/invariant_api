@@ -12,10 +12,21 @@ fixed by giving local test runs their own `invariant_test` database (see
 .env.example), but this assertion is the actual backstop: it refuses to run
 if DATABASE_URL ever again resolves to anything that isn't unmistakably a
 test database, regardless of why.
+
+GitHub Actions is exempted from the name check: ci.yml's `postgres` service
+is a fresh container per job (created and destroyed with the job itself),
+so it's always disposable regardless of what its POSTGRES_DB happens to be
+named ("invariant", to mirror local dev) -- GITHUB_ACTIONS=true is the
+standard, GitHub-set env var for detecting this, not something guessable by
+a misconfigured local .env.
 """
+
+import os
 
 
 def assert_test_database(conn) -> None:
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        return
     with conn.cursor() as cur:
         cur.execute("SELECT current_database()")
         (name,) = cur.fetchone()
