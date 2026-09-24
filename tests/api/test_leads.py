@@ -12,6 +12,8 @@ from invariant_api import main
 from invariant_api.routes import leads
 from invariant_api.storage import postgres as db
 
+from conftest import assert_test_database
+
 pytestmark = pytest.mark.integration
 
 client = TestClient(main.app)
@@ -34,6 +36,7 @@ def clean_tables():
         conn = db.connect()
     except (KeyError, psycopg.OperationalError) as exc:
         pytest.skip(f"no reachable DATABASE_URL configured: {exc}")
+    assert_test_database(conn)
     with conn.cursor() as cur:
         cur.execute("DELETE FROM leads")
     conn.commit()
