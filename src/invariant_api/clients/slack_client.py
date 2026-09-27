@@ -1,8 +1,8 @@
 """Notificação best-effort pro Slack quando um lead novo é cadastrado --
 NUNCA a fonte de verdade (ver routes/leads.py: persiste no Postgres
 primeiro, sempre). Webhook lido no ponto de uso (não em constante
-module-level), mesma convenção de MERCADO_PAGO_ACCESS_TOKEN em
-billing.py -- nunca exposto ao frontend, nunca commitado, nunca logado.
+module-level) -- nunca exposto ao frontend, nunca commitado, nunca
+logado.
 
 Payload em Block Kit com `plain_text`: Slack não interpreta `<!channel>`/
 `<@id>`/link markup dentro de plain_text, então nenhum dado fornecido
