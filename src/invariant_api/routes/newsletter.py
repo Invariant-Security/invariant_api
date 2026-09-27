@@ -1,8 +1,8 @@
 """Newsletter signup for the "subscribe to updates" form on Home.jsx.
 
 Storage only -- no email/messaging provider is wired up yet, that comes
-once one is contracted. Mirrors the billing.py route pattern (plain
-function-based route, db.connect()/commit()/close() per request).
+once one is contracted. Plain function-based route,
+db.connect()/commit()/close() per request.
 """
 
 from fastapi import APIRouter, HTTPException
