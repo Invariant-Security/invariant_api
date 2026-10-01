@@ -113,3 +113,26 @@ def test_old_env_keeps_values_and_gains_only_what_is_missing(steps):
     assert env["INVARIANT_WEB_PORT"] == "8080"
     assert re.fullmatch(r"[0-9a-f]{64}", env["INVARIANT_USAGE_HMAC_KEY"]), "linha vazia deve ser preenchida"
     assert steps["upgraded_old_env"]["usage_lines"] == 1, "a linha vazia antiga deve ser substituída, não duplicada"
+
+
+LONG_DOMAIN = "h4hp2ch4jnienhhu2usyohcrub.phxx.internal.cloudapp.net"
+
+
+def test_long_fqdn_still_produces_a_certificate():
+    """FQDN de nuvem com mais de 64 caracteres (o limite do CN). Achado
+    real: o runner do GitHub tem um nome assim e o openssl recusava o
+    certificado, derrubando a instalação inteira."""
+    if shutil.which("docker") is None:
+        pytest.skip("docker indisponível")
+    proc = subprocess.run(
+        ["docker", "run", "--rm", "--hostname", "runnervm8df0l", "--domainname", LONG_DOMAIN,
+         "-v", f"{SCRIPT}:/provision.sh:ro", "debian:12", "bash", "-c",
+         "apt-get update -qq >/dev/null && apt-get install -y -qq openssl hostname >/dev/null && "
+         "sh /provision.sh /etc/invariant/.env /etc/invariant/tls >/dev/null && "
+         "openssl x509 -in /etc/invariant/tls/cert.pem -noout -subject -ext subjectAltName"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    assert "CN = runnervm8df0l" in proc.stdout
+    assert f"DNS:runnervm8df0l.{LONG_DOMAIN}" in proc.stdout
+    assert "DNS:runnervm8df0l," in proc.stdout or proc.stdout.rstrip().endswith("DNS:runnervm8df0l")

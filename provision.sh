@@ -64,7 +64,13 @@ else
     mkdir -p "$TLS_DIR"
     chmod 755 "$TLS_DIR"
     host="$(hostname -f 2>/dev/null || hostname)"
+    short="$(hostname -s 2>/dev/null || echo "$host")"
+    # CN aceita no máximo 64 caracteres (FQDNs de nuvem passam disso e o
+    # openssl recusa o certificado inteiro); o nome completo vai no SAN,
+    # que é o que o navegador confere.
+    cn="$(printf '%s' "${short:-invariant}" | cut -c1-64)"
     san="DNS:${host},DNS:localhost,IP:127.0.0.1"
+    [ "$short" != "$host" ] && [ -n "$short" ] && san="${san},DNS:${short}"
     for ip in $(hostname -I 2>/dev/null || true); do
         case "$ip" in
             *:*) san="${san},IP:${ip}" ;;   # IPv6
@@ -73,7 +79,7 @@ else
     done
     tmp="$(mktemp -d)"
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-        -days 1095 -subj "/CN=${host}" -addext "subjectAltName=${san}" \
+        -days 1095 -subj "/CN=${cn}" -addext "subjectAltName=${san}" \
         -keyout "$tmp/key.pem" -out "$tmp/cert.pem"
     install -m 600 "$tmp/key.pem" "$TLS_DIR/key.pem"
     install -m 644 "$tmp/cert.pem" "$TLS_DIR/cert.pem"
