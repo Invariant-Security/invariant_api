@@ -57,6 +57,19 @@ _INSERT_DEMO_HOST_SNAPSHOT = (_QUERIES_DIR / "insert_demo_host_snapshot.sql").re
 _SELECT_ACTIVE_DEMO_HOST_SNAPSHOT = (_QUERIES_DIR / "select_active_demo_host_snapshot.sql").read_text()
 _REVOKE_ACTIVE_DEMO_HOST_SNAPSHOT = (_QUERIES_DIR / "revoke_active_demo_host_snapshot.sql").read_text()
 
+_INSERT_ASSESSMENT_RECORD = (_QUERIES_DIR / "insert_assessment_record.sql").read_text()
+_INSERT_USAGE_EVENT = (_QUERIES_DIR / "insert_usage_event.sql").read_text()
+_INSERT_DOMAIN_EVENT = (_QUERIES_DIR / "insert_domain_event.sql").read_text()
+_COUNT_BILLABLE_HOSTS = (_QUERIES_DIR / "count_billable_hosts.sql").read_text()
+_SELECT_ASSESSMENTS_BY_ENDPOINT = (_QUERIES_DIR / "select_assessments_by_endpoint.sql").read_text()
+_SELECT_ASSESSMENT_BY_PUBLIC_ID = (_QUERIES_DIR / "select_assessment_by_public_id.sql").read_text()
+_PURGE_EXPIRED_IDEMPOTENCY_KEYS = (_QUERIES_DIR / "purge_expired_idempotency_keys.sql").read_text()
+_INSERT_IDEMPOTENCY_KEY = (_QUERIES_DIR / "insert_idempotency_key.sql").read_text()
+_SELECT_IDEMPOTENCY_KEY_FOR_UPDATE = (_QUERIES_DIR / "select_idempotency_key_for_update.sql").read_text()
+_TAKE_OVER_IDEMPOTENCY_KEY = (_QUERIES_DIR / "take_over_idempotency_key.sql").read_text()
+_COMPLETE_IDEMPOTENCY_KEY = (_QUERIES_DIR / "complete_idempotency_key.sql").read_text()
+_DELETE_IDEMPOTENCY_KEY = (_QUERIES_DIR / "delete_idempotency_key.sql").read_text()
+
 
 def connect() -> psycopg.Connection:
     """Open a connection using DATABASE_URL from .env / the environment."""
@@ -531,3 +544,165 @@ def revoke_active_demo_host_snapshot(conn: psycopg.Connection) -> bool:
     with conn.cursor() as cur:
         cur.execute(_REVOKE_ACTIVE_DEMO_HOST_SNAPSHOT)
         return cur.fetchone() is not None
+
+
+# --- avaliações, consumo e eventos (F1) ------------------------------------
+
+_ASSESSMENT_COLUMNS = (
+    "public_id", "endpoint_id", "assessed_ip", "assessed_at", "source",
+    "pass_count", "fail_count", "not_assessed_count", "not_applicable_count", "compliance_pct",
+)
+
+
+def insert_assessment_record(
+    conn: psycopg.Connection,
+    *,
+    endpoint_id: int,
+    target_type: str,
+    pass_count: int,
+    fail_count: int,
+    not_assessed_count: int,
+    not_applicable_count: int,
+    compliance_pct: int | None,
+    assessed_at,
+    assessed_ip: str,
+    source: str,
+) -> dict:
+    with conn.cursor() as cur:
+        cur.execute(
+            _INSERT_ASSESSMENT_RECORD,
+            {
+                "endpoint_id": endpoint_id,
+                "target_type": target_type,
+                "pass_count": pass_count,
+                "fail_count": fail_count,
+                "not_assessed_count": not_assessed_count,
+                "not_applicable_count": not_applicable_count,
+                "compliance_pct": compliance_pct,
+                "assessed_at": assessed_at,
+                "assessed_ip": assessed_ip,
+                "source": source,
+            },
+        )
+        id, public_id, stored_at = cur.fetchone()
+        return {"id": id, "public_id": public_id, "assessed_at": stored_at}
+
+
+def insert_usage_event(
+    conn: psycopg.Connection,
+    *,
+    occurred_at,
+    host_kind: str,
+    host_key: str,
+    source: str,
+    endpoint_id: int | None,
+    assessment_public_id,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            _INSERT_USAGE_EVENT,
+            {
+                "occurred_at": occurred_at,
+                "host_kind": host_kind,
+                "host_key": host_key,
+                "source": source,
+                "endpoint_id": endpoint_id,
+                "assessment_public_id": assessment_public_id,
+            },
+        )
+
+
+def insert_domain_event(conn: psycopg.Connection, *, event_type: str, occurred_at, payload: dict):
+    with conn.cursor() as cur:
+        cur.execute(
+            _INSERT_DOMAIN_EVENT,
+            {"event_type": event_type, "occurred_at": occurred_at, "payload": Jsonb(payload)},
+        )
+        return cur.fetchone()[0]
+
+
+def count_billable_hosts(conn: psycopg.Connection, *, start, end) -> dict[str, int]:
+    """Identidades distintas por tipo no período [start, end) -- a unidade
+    de cobrança. Tipos sem consumo vêm como 0."""
+    counts = {"linux_host": 0, "docker_container": 0}
+    with conn.cursor() as cur:
+        cur.execute(_COUNT_BILLABLE_HOSTS, {"start": start, "end": end})
+        for host_kind, count in cur.fetchall():
+            counts[host_kind] = count
+    return counts
+
+
+def select_assessments_by_endpoint(conn: psycopg.Connection, *, endpoint_id: int) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_ASSESSMENTS_BY_ENDPOINT, {"endpoint_id": endpoint_id})
+        return [dict(zip(_ASSESSMENT_COLUMNS, row)) for row in cur.fetchall()]
+
+
+def select_assessment_by_public_id(conn: psycopg.Connection, *, endpoint_id: int, public_id) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_ASSESSMENT_BY_PUBLIC_ID, {"endpoint_id": endpoint_id, "public_id": public_id})
+        row = cur.fetchone()
+        return dict(zip(_ASSESSMENT_COLUMNS, row)) if row else None
+
+
+# --- idempotência (F1) -------------------------------------------------------
+
+def purge_expired_idempotency_keys(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_PURGE_EXPIRED_IDEMPOTENCY_KEYS)
+
+
+def insert_idempotency_key(conn: psycopg.Connection, *, principal: str, idem_key: str, route: str, fingerprint: str) -> bool:
+    """True se a chave foi reservada agora; False se já existia."""
+    with conn.cursor() as cur:
+        cur.execute(
+            _INSERT_IDEMPOTENCY_KEY,
+            {"principal": principal, "idem_key": idem_key, "route": route, "fingerprint": fingerprint},
+        )
+        return cur.fetchone() is not None
+
+
+def select_idempotency_key_for_update(conn: psycopg.Connection, *, principal: str, idem_key: str) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_IDEMPOTENCY_KEY_FOR_UPDATE, {"principal": principal, "idem_key": idem_key})
+        row = cur.fetchone()
+        if row is None:
+            return None
+        route, fingerprint, state, response_status, response_body, lease_expired = row
+        return {
+            "route": route,
+            "fingerprint": fingerprint,
+            "state": state,
+            "response_status": response_status,
+            "response_body": response_body,
+            "lease_expired": lease_expired,
+        }
+
+
+def take_over_idempotency_key(conn: psycopg.Connection, *, principal: str, idem_key: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_TAKE_OVER_IDEMPOTENCY_KEY, {"principal": principal, "idem_key": idem_key})
+
+
+def complete_idempotency_key(
+    conn: psycopg.Connection, *, principal: str, idem_key: str, response_status: int, response_body: dict
+) -> bool:
+    """False se a reserva não existe mais em in_progress (expirou/foi
+    assumida) -- quem chama desfaz a transação inteira."""
+    with conn.cursor() as cur:
+        cur.execute(
+            _COMPLETE_IDEMPOTENCY_KEY,
+            {
+                "principal": principal,
+                "idem_key": idem_key,
+                "response_status": response_status,
+                "response_body": Jsonb(response_body),
+            },
+        )
+        return cur.rowcount == 1
+
+
+def delete_idempotency_key(conn: psycopg.Connection, *, principal: str, idem_key: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_DELETE_IDEMPOTENCY_KEY, {"principal": principal, "idem_key": idem_key})
+

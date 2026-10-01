@@ -14,14 +14,12 @@ ausência deles em falha em vez de skip.
 
 import json
 import os
-import threading
-import time
 import urllib.error
 import urllib.request
 
 import pytest
-import uvicorn
 from fastapi.testclient import TestClient
+from live_server import live_server
 
 from conftest import assert_test_database
 
@@ -54,29 +52,12 @@ TOKENS = {
 }
 
 
-def _start(app):
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.time() + 15
-    while not server.started:
-        assert time.time() < deadline, "serviço não subiu"
-        time.sleep(0.02)
-    port = server.servers[0].sockets[0].getsockname()[1]
-    return server, thread, f"http://127.0.0.1:{port}"
-
-
 @pytest.fixture(scope="module")
 def services():
     previous = {name: os.environ.get(name) for name in TOKENS}
     os.environ.update(TOKENS)
-    started = {name: _start(app) for name, app in (
-        ("assessment", assessment_app), ("discovery", discovery_app), ("ingestion", ingestion_app))}
-    urls = {name: s[2] for name, s in started.items()}
-    yield urls
-    for server, thread, _ in started.values():
-        server.should_exit = True
-        thread.join(timeout=10)
+    with live_server(assessment_app) as a, live_server(discovery_app) as d, live_server(ingestion_app) as i:
+        yield {"assessment": a, "discovery": d, "ingestion": i}
     for name, value in previous.items():
         if value is None:
             os.environ.pop(name, None)
