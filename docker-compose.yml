@@ -45,6 +45,10 @@ services:
     # jeito que o monólito's subprocess.run(["docker", "exec", ...]) já
     # fazia.
     volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+    environment:
+      # Token próprio deste serviço (ver internal_auth.py dele); o api
+      # apresenta o mesmo valor. Um por serviço, nunca compartilhado.
+      INVARIANT_INTERNAL_ASSESSMENT_TOKEN: ${INVARIANT_INTERNAL_ASSESSMENT_TOKEN:?INVARIANT_INTERNAL_ASSESSMENT_TOKEN obrigatório}
     expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
@@ -56,6 +60,10 @@ services:
     build:
       context: ../invariant_ingestion
     volumes: ["../../data/raw:/app/data/raw"]
+    environment:
+      # Token próprio deste serviço (ver internal_auth.py dele); o api
+      # apresenta o mesmo valor. Um por serviço, nunca compartilhado.
+      INVARIANT_INTERNAL_INGESTION_TOKEN: ${INVARIANT_INTERNAL_INGESTION_TOKEN:?INVARIANT_INTERNAL_INGESTION_TOKEN obrigatório}
     expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
@@ -68,6 +76,10 @@ services:
       context: ../invariant_discovery
     # Sondagem pura de rede (asyncio/socket/TLS) -- sem docker.sock, sem
     # nenhum mount, diferente de assessment (docker exec no host).
+    environment:
+      # Token próprio deste serviço (ver internal_auth.py dele); o api
+      # apresenta o mesmo valor. Um por serviço, nunca compartilhado.
+      INVARIANT_INTERNAL_DISCOVERY_TOKEN: ${INVARIANT_INTERNAL_DISCOVERY_TOKEN:?INVARIANT_INTERNAL_DISCOVERY_TOKEN obrigatório}
     expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
@@ -96,6 +108,10 @@ services:
       # sem esse segredo não deve subir assinando sessão com um valor
       # inseguro conhecido.
       INVARIANT_API_SECRET_KEY: ${INVARIANT_API_SECRET_KEY:?INVARIANT_API_SECRET_KEY must be set}
+      # Tokens para falar com cada serviço interno (um por serviço).
+      INVARIANT_INTERNAL_ASSESSMENT_TOKEN: ${INVARIANT_INTERNAL_ASSESSMENT_TOKEN:?INVARIANT_INTERNAL_ASSESSMENT_TOKEN obrigatório}
+      INVARIANT_INTERNAL_DISCOVERY_TOKEN: ${INVARIANT_INTERNAL_DISCOVERY_TOKEN:?INVARIANT_INTERNAL_DISCOVERY_TOKEN obrigatório}
+      INVARIANT_INTERNAL_INGESTION_TOKEN: ${INVARIANT_INTERNAL_INGESTION_TOKEN:?INVARIANT_INTERNAL_INGESTION_TOKEN obrigatório}
     volumes: ["../../data/demo:/app/data/demo:ro"]
     networks: ["default", "vps-proxy"]
     expose: ["8000"]
