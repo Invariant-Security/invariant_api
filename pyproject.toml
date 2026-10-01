@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Control plane: the only invariant_* service that touches Postgres. Orchestrates invariant_assessment/invariant_ingestion over HTTP and serves the frontend."
 requires-python = ">=3.11"
 dependencies = [
-    "invariant_contracts @ git+https://github.com/Invariant-Security/invariant_contracts.git@main",
+    "invariant_contracts @ git+https://github.com/Invariant-Security/invariant_contracts.git@v0.2.0",
     "fastapi",
     "uvicorn[standard]",
     "httpx",
