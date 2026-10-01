@@ -17,8 +17,9 @@ PROVISION = Path(__file__).resolve().parents[2] / "provision.sh"
 @pytest.fixture(scope="module")
 def tls_dir(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("appliance")
-    subprocess.run(["sh", str(PROVISION), str(tmp / ".env"), str(tmp / "tls")], check=True,
-                   capture_output=True, timeout=60)
+    proc = subprocess.run(["sh", str(PROVISION), str(tmp / ".env"), str(tmp / "tls")],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
     return tmp / "tls"
 
 

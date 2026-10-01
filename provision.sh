@@ -74,7 +74,7 @@ else
     tmp="$(mktemp -d)"
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
         -days 1095 -subj "/CN=${host}" -addext "subjectAltName=${san}" \
-        -keyout "$tmp/key.pem" -out "$tmp/cert.pem" 2>/dev/null
+        -keyout "$tmp/key.pem" -out "$tmp/cert.pem"
     install -m 600 "$tmp/key.pem" "$TLS_DIR/key.pem"
     install -m 644 "$tmp/cert.pem" "$TLS_DIR/cert.pem"
     rm -rf "$tmp"

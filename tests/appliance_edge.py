@@ -58,8 +58,9 @@ def appliance_edge(https_port_label: str = "443"):
     net, echo, edge = f"edge-net-{tag}", f"edge-echo-{tag}", f"edge-nginx-{tag}"
     with tempfile.TemporaryDirectory() as tmp:
         tls = Path(tmp) / "tls"
-        subprocess.run(["sh", str(PROVISION), str(Path(tmp) / ".env"), str(tls)],
-                       check=True, capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(["sh", str(PROVISION), str(Path(tmp) / ".env"), str(tls)],
+                              capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
         # a chave fica 600 do usuário dos testes; o nginx do container roda
         # o master como root e lê normalmente
         _docker("network", "create", net)
