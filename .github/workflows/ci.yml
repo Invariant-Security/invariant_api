@@ -1,11 +1,8 @@
-# Só Postgres (a única coisa este serviço de fato acessa) -- sem
-# Playwright, sem os 6 containers de teste (esses são responsabilidade do
-# invariant_assessment agora, e os clients de assessment/ingestion nem
-# precisam estar rodando pros testes de tests/api/ -- são portados 1:1 do
-# monólito e não tocam nas rotas novas assess.py/ingest.py). Testes das
-# rotas novas ficam marcados integration por enquanto (precisam dos outros
-# 2 serviços rodando) -- não bloqueiam o CI, mesma disciplina já usada em
-# invariant_ingestion.
+# Postgres real + os 3 serviços internos reais (assessment, discovery,
+# ingestion) instalados a partir dos checkouts irmãos na mesma branch:
+# tests/api/test_internal_services.py sobe cada um num uvicorn de verdade
+# para provar a autenticação interna ponta a ponta. Sem Playwright e sem os
+# containers de fixture -- esses continuam nos CIs de cada serviço.
 name: ci
 
 on:
@@ -34,16 +31,31 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgresql://invariant:invariant_dev@localhost:5432/invariant
+      # Ausência dos serviços internos vira falha, não skip silencioso.
+      INVARIANT_REQUIRE_INTERNAL_SERVICES: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
+      - uses: actions/checkout@v4
+        with:
+          repository: Invariant-Security/invariant_assessment
+          ref: ${{ github.base_ref || github.ref_name }}
+          path: _services/invariant_assessment
+      - uses: actions/checkout@v4
+        with:
+          repository: Invariant-Security/invariant_discovery
+          ref: ${{ github.base_ref || github.ref_name }}
+          path: _services/invariant_discovery
+      - uses: actions/checkout@v4
+        with:
+          repository: Invariant-Security/invariant_ingestion
+          ref: ${{ github.base_ref || github.ref_name }}
+          path: _services/invariant_ingestion
+      - run: pip install -e _services/invariant_assessment -e _services/invariant_discovery -e _services/invariant_ingestion
       - run: alembic upgrade head
-      # test_postgres.py is marked `integration` (same generic "needs a
-      # real external service" marker convention as the other invariant_*
-      # repos) but Postgres IS available here -- no filter needed. Only
-      # future tests against the other 2 services (not up in this CI)
-      # would need `-m "not integration"`.
+      # Postgres e os 3 serviços estão disponíveis aqui: roda tudo, inclusive
+      # o que é marcado `integration`.
       - run: pytest tests/ -q

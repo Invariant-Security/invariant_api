@@ -8,6 +8,8 @@ import os
 
 import httpx
 
+from invariant_api.clients.internal_auth import DISCOVERY_TOKEN_ENV, auth_headers
+
 BASE_URL = os.environ.get("INVARIANT_DISCOVERY_URL", "http://discovery:8000")
 
 
@@ -17,6 +19,6 @@ def discover(addresses: list[str]) -> list[dict]:
     ranges/CIDR já expandidos pelo lado do invariant_discovery. Ver
     invariant_discovery's api.py para o response_model exato.
     """
-    resp = httpx.post(f"{BASE_URL}/discover", json={"addresses": addresses}, timeout=120)
+    resp = httpx.post(f"{BASE_URL}/discover", json={"addresses": addresses}, headers=auth_headers(DISCOVERY_TOKEN_ENV), timeout=120)
     resp.raise_for_status()
     return resp.json()["results"]
