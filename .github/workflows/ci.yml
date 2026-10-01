@@ -1,8 +1,10 @@
 # Postgres real + os 3 serviços internos reais (assessment, discovery,
 # ingestion) instalados a partir dos checkouts irmãos na mesma branch:
 # tests/api/test_internal_services.py sobe cada um num uvicorn de verdade
-# para provar a autenticação interna ponta a ponta. Sem Playwright e sem os
-# containers de fixture -- esses continuam nos CIs de cada serviço.
+# para provar a autenticação interna ponta a ponta. Dos containers de
+# fixture do assessment, só o `ssh-target` sobe aqui: o gate da F1
+# (tests/api/test_assessment_metering.py) avalia um host por SSH de verdade.
+# Os outros continuam no CI do próprio assessment.
 name: ci
 
 on:
@@ -33,6 +35,7 @@ jobs:
       DATABASE_URL: postgresql://invariant:invariant_dev@localhost:5432/invariant
       # Ausência dos serviços internos vira falha, não skip silencioso.
       INVARIANT_REQUIRE_INTERNAL_SERVICES: "1"
+      INVARIANT_ASSESSMENT_REPO: _services/invariant_assessment
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -55,7 +58,15 @@ jobs:
           ref: ${{ github.base_ref || github.ref_name }}
           path: _services/invariant_ingestion
       - run: pip install -e _services/invariant_assessment -e _services/invariant_discovery -e _services/invariant_ingestion
+      - name: Subir o host SSH de fixture do assessment
+        run: docker compose -f _services/invariant_assessment/tests/fixtures/docker-compose.yml up -d --build --wait --wait-timeout 120 ssh-target
       - run: alembic upgrade head
       # Postgres e os 3 serviços estão disponíveis aqui: roda tudo, inclusive
       # o que é marcado `integration`.
       - run: pytest tests/ -q
+      - name: Logs em caso de falha
+        if: failure()
+        run: docker compose -f _services/invariant_assessment/tests/fixtures/docker-compose.yml logs --tail=80 ssh-target || true
+      - name: Derrubar fixture
+        if: always()
+        run: docker compose -f _services/invariant_assessment/tests/fixtures/docker-compose.yml down -v || true
