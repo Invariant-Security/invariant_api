@@ -11,6 +11,9 @@ dependencies = [
     "psycopg[binary]",
     "alembic",
     "reportlab",
+    # leitura do certificado do appliance (F0) e verificação Ed25519 do
+    # certificado de licença (F3)
+    "cryptography>=43",
 ]
 
 [project.optional-dependencies]

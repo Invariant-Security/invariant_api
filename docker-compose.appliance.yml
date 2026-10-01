@@ -86,6 +86,7 @@ services:
       # Gerado pelo postinst do .deb em /etc/invariant/.env -- nunca
       # escolhido à mão (ver invariant_packaging/).
       INVARIANT_API_SECRET_KEY: ${INVARIANT_API_SECRET_KEY:?INVARIANT_API_SECRET_KEY obrigatório}
+      INVARIANT_TLS_CERT_FILE: /run/invariant/tls/cert.pem
       # Tokens para falar com cada serviço interno (um por serviço).
       INVARIANT_INTERNAL_ASSESSMENT_TOKEN: ${INVARIANT_INTERNAL_ASSESSMENT_TOKEN:?INVARIANT_INTERNAL_ASSESSMENT_TOKEN obrigatório}
       INVARIANT_INTERNAL_DISCOVERY_TOKEN: ${INVARIANT_INTERNAL_DISCOVERY_TOKEN:?INVARIANT_INTERNAL_DISCOVERY_TOKEN obrigatório}
@@ -95,7 +96,12 @@ services:
       # sempre fala com a mesma origem (http://<ip-do-appliance>/), nunca
       # cross-origin de verdade.
       INVARIANT_API_CORS_ORIGINS: http://localhost:${INVARIANT_WEB_PORT:-80},http://127.0.0.1:${INVARIANT_WEB_PORT:-80}
-    volumes: ["appliance_data_demo:/app/data/demo"]
+    volumes:
+      - appliance_data_demo:/app/data/demo
+      # Só o certificado PÚBLICO (nunca a chave): o console mostra a
+      # impressão digital para o cliente/vendedor fixar. provision.sh roda
+      # antes do compose em todo canal de instalação, então o arquivo existe.
+      - ${INVARIANT_TLS_DIR:-/etc/invariant/tls}/cert.pem:/run/invariant/tls/cert.pem:ro
     expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
@@ -106,16 +112,26 @@ services:
   web:
     image: ${INVARIANT_IMAGE_REGISTRY:-ghcr.io/invariant-security}/invariant-web:${INVARIANT_VERSION:-latest}
     restart: unless-stopped
-    ports: ["${INVARIANT_WEB_PORT:-80}:80"]
+    ports:
+      - "${INVARIANT_WEB_PORT:-80}:80"
+      - "${INVARIANT_HTTPS_PORT:-443}:443"
+    environment:
+      # Porta HTTPS pública, usada no redirecionamento 80 -> HTTPS. Só
+      # variáveis INVARIANT_* são substituídas no template (o resto,
+      # como $host, é do próprio nginx).
+      INVARIANT_HTTPS_PORT: ${INVARIANT_HTTPS_PORT:-443}
+      NGINX_ENVSUBST_FILTER: "^INVARIANT_"
     volumes:
-      # Roteamento único (só a porta do web, sem porta de API separada
-      # pro cliente lembrar) -- sobrescreve o nginx.conf baked na imagem
-      # (que serve só estático) com uma versão que também proxeia /api/.
-      # Volume mount, não rebuild de imagem -- reaproveita a imagem já
-      # publicada sem variante nova.
-      - ./nginx.appliance.conf:/etc/nginx/conf.d/default.conf:ro
+      # Roteamento único (só as portas do web, sem porta de API separada)
+      # -- o template substitui o nginx.conf baked na imagem por um que
+      # serve HTTPS e proxeia /api/ e /auth/. Volume, não rebuild de imagem.
+      - ./nginx.appliance.conf:/etc/nginx/templates/default.conf.template:ro
+      # Certificado gerado pelo provision.sh (ou o da empresa, trocado
+      # direto em /etc/invariant/tls sem mexer em imagem/container).
+      - ${INVARIANT_TLS_DIR:-/etc/invariant/tls}:/etc/nginx/tls:ro
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80"]
+      # Porta 80 só responde /healthz; todo o resto redireciona pra HTTPS.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3

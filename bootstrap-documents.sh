@@ -18,8 +18,12 @@
 # subir. Erros de um documento são só logados, os outros continuam.
 set -uo pipefail
 
-WEB_PORT="${INVARIANT_WEB_PORT:-80}"
-BASE="http://127.0.0.1:${WEB_PORT}/api"
+# HTTPS no loopback: a porta 80 do appliance só redireciona (ver
+# nginx.appliance.conf). -k porque o tráfego nunca sai da máquina e o
+# certificado da empresa (que pode substituir o autoassinado) não precisa
+# cobrir 127.0.0.1.
+HTTPS_PORT="${INVARIANT_HTTPS_PORT:-443}"
+BASE="https://127.0.0.1:${HTTPS_PORT}/api"
 # Default é exatamente o que os alvos reais desta VPS precisam hoje (host
 # Ubuntu 24.04 + containers de produção em Debian 12/13) -- sobrescrevível
 # via INVARIANT_BOOTSTRAP_DOCUMENTS (separado por espaço) em
@@ -28,6 +32,13 @@ BASE="http://127.0.0.1:${WEB_PORT}/api"
 DOCUMENTS="${INVARIANT_BOOTSTRAP_DOCUMENTS:-cis-ubuntu-linux-24-04 cis-debian-linux-12 cis-debian-linux-13}"
 
 log() { echo "[bootstrap-documents] $1"; }
+
+# Sucesso = HTTP 200 e nada mais. `curl -f` sozinho trata 3xx como
+# sucesso sem seguir o redirecionamento -- um passo que não fez nada não
+# pode ser registrado como feito.
+post_ok() {
+    [ "$(curl -k -sS -o /dev/null -w '%{http_code}' -X POST "$1" 2>/dev/null || echo 000)" = "200" ]
+}
 
 for doc in $DOCUMENTS; do
     # KNOWN_CIS_DOCUMENTS's document_slug é sempre a chave sem "cis-" e com
@@ -38,22 +49,21 @@ for doc in $DOCUMENTS; do
     underscored="${doc#cis-}"
     underscored="${underscored//-/_}"
 
-    status="$(curl -fsS -o /dev/null -w '%{http_code}' -X POST "${BASE}/ingest/normalize/${underscored}" 2>/dev/null || echo 000)"
-    if [ "$status" = "200" ]; then
+    if post_ok "${BASE}/ingest/normalize/${underscored}"; then
         log "$doc já ingerido, pulando."
         continue
     fi
 
     log "Ingerindo $doc (fetch + extract + normalize, primeira vez -- pode levar ~30s)..."
-    if ! curl -fsS -X POST "${BASE}/ingest/fetch/${doc}" >/dev/null; then
+    if ! post_ok "${BASE}/ingest/fetch/${doc}"; then
         log "AVISO: fetch de $doc falhou, pulando (rode manualmente depois se precisar)."
         continue
     fi
-    if ! curl -fsS -X POST "${BASE}/ingest/extract/${doc}" >/dev/null; then
+    if ! post_ok "${BASE}/ingest/extract/${doc}"; then
         log "AVISO: extract de $doc falhou, pulando."
         continue
     fi
-    if ! curl -fsS -X POST "${BASE}/ingest/normalize/${underscored}" >/dev/null; then
+    if ! post_ok "${BASE}/ingest/normalize/${underscored}"; then
         log "AVISO: normalize de $doc falhou, pulando."
         continue
     fi
