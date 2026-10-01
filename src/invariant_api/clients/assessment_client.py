@@ -8,6 +8,8 @@ import os
 
 import httpx
 
+from invariant_api.clients.internal_auth import ASSESSMENT_TOKEN_ENV, auth_headers
+
 BASE_URL = os.environ.get("INVARIANT_ASSESSMENT_URL", "http://assessment:8000")
 
 
@@ -22,7 +24,7 @@ def list_containers() -> list[dict]:
     snapshot (never inferred from name). See invariant_assessment's
     api.py for the exact response_model.
     """
-    resp = httpx.get(f"{BASE_URL}/assessment/containers", timeout=10)
+    resp = httpx.get(f"{BASE_URL}/assessment/containers", headers=auth_headers(ASSESSMENT_TOKEN_ENV), timeout=10)
     resp.raise_for_status()
     return resp.json()
 
@@ -33,7 +35,7 @@ def check_target(target: str) -> dict:
     str|None} -- see invariant_assessment's api.py for the exact
     response_model. Cheap pre-flight for run_assessment()'s `target`.
     """
-    resp = httpx.post(f"{BASE_URL}/assessment/check", params={"target": target}, timeout=10)
+    resp = httpx.post(f"{BASE_URL}/assessment/check", params={"target": target}, headers=auth_headers(ASSESSMENT_TOKEN_ENV), timeout=10)
     resp.raise_for_status()
     return resp.json()
 
@@ -43,7 +45,7 @@ def run_assessment(target: str) -> dict:
     "PASS"|"FAIL", "evidence": str}, ...]} -- see invariant_assessment's
     api.py for the exact response_model.
     """
-    resp = httpx.post(f"{BASE_URL}/assessment/run", params={"target": target}, timeout=30)
+    resp = httpx.post(f"{BASE_URL}/assessment/run", params={"target": target}, headers=auth_headers(ASSESSMENT_TOKEN_ENV), timeout=30)
     resp.raise_for_status()
     return resp.json()
 
@@ -71,6 +73,7 @@ def check_remote(
             "key_material": key_material,
             "password": password,
         },
+        headers=auth_headers(ASSESSMENT_TOKEN_ENV),
         timeout=10,
     )
     resp.raise_for_status()
@@ -102,6 +105,7 @@ def run_assessment_remote(
             "key_material": key_material,
             "password": password,
         },
+        headers=auth_headers(ASSESSMENT_TOKEN_ENV),
         timeout=30,
     )
     resp.raise_for_status()

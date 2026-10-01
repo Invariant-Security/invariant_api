@@ -35,6 +35,10 @@ services:
     build:
       context: ../invariant_assessment
     volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+    environment:
+      # Token próprio deste serviço (ver internal_auth.py dele); o api
+      # apresenta o mesmo valor. Um por serviço, nunca compartilhado.
+      INVARIANT_INTERNAL_ASSESSMENT_TOKEN: ${INVARIANT_INTERNAL_ASSESSMENT_TOKEN:?INVARIANT_INTERNAL_ASSESSMENT_TOKEN obrigatório}
     expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
@@ -46,6 +50,10 @@ services:
     build:
       context: ../invariant_ingestion
     volumes: ["../../data/raw:/app/data/raw"]
+    environment:
+      # Token próprio deste serviço (ver internal_auth.py dele); o api
+      # apresenta o mesmo valor. Um por serviço, nunca compartilhado.
+      INVARIANT_INTERNAL_INGESTION_TOKEN: ${INVARIANT_INTERNAL_INGESTION_TOKEN:?INVARIANT_INTERNAL_INGESTION_TOKEN obrigatório}
     expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
@@ -56,6 +64,10 @@ services:
   discovery:
     build:
       context: ../invariant_discovery
+    environment:
+      # Token próprio deste serviço (ver internal_auth.py dele); o api
+      # apresenta o mesmo valor. Um por serviço, nunca compartilhado.
+      INVARIANT_INTERNAL_DISCOVERY_TOKEN: ${INVARIANT_INTERNAL_DISCOVERY_TOKEN:?INVARIANT_INTERNAL_DISCOVERY_TOKEN obrigatório}
     expose: ["8000"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
@@ -72,7 +84,11 @@ services:
       INVARIANT_ASSESSMENT_URL: http://assessment:8000
       INVARIANT_INGESTION_URL: http://ingestion:8000
       INVARIANT_DISCOVERY_URL: http://discovery:8000
-      INVARIANT_API_SECRET_KEY: ${INVARIANT_API_SECRET_KEY:-}
+      INVARIANT_API_SECRET_KEY: ${INVARIANT_API_SECRET_KEY:?INVARIANT_API_SECRET_KEY obrigatório}
+      # Tokens para falar com cada serviço interno (um por serviço).
+      INVARIANT_INTERNAL_ASSESSMENT_TOKEN: ${INVARIANT_INTERNAL_ASSESSMENT_TOKEN:?INVARIANT_INTERNAL_ASSESSMENT_TOKEN obrigatório}
+      INVARIANT_INTERNAL_DISCOVERY_TOKEN: ${INVARIANT_INTERNAL_DISCOVERY_TOKEN:?INVARIANT_INTERNAL_DISCOVERY_TOKEN obrigatório}
+      INVARIANT_INTERNAL_INGESTION_TOKEN: ${INVARIANT_INTERNAL_INGESTION_TOKEN:?INVARIANT_INTERNAL_INGESTION_TOKEN obrigatório}
       INVARIANT_API_CORS_ORIGINS: https://teste.invariantsec.org
       # Notificação de novos leads (routes/leads.py) -- vazio até existir um
       # .env com o webhook real; sem isso, o lead continua sendo salvo

@@ -6,16 +6,37 @@ invariant_assessment/invariant_ingestion.
 """
 
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from invariant_api.auth import SECRET_KEY_ENV
+from invariant_api.clients.internal_auth import SERVICE_TOKEN_ENVS
 from invariant_api.config import load_dotenv
 from invariant_api.routes import assess, auth, demo, demo_host_snapshot, demo_snapshot, endpoints, ingest, leads, newsletter, reports
 
 load_dotenv()
 
-app = FastAPI(title="Invariant API")
+# Segredos separados por função; sem qualquer um deles o api não sobe
+# (falha visível no deploy em vez de rodar com sessão forjável ou sem
+# conseguir falar com os serviços internos).
+REQUIRED_SECRETS = (SECRET_KEY_ENV, *SERVICE_TOKEN_ENVS)
+
+
+def require_secrets() -> None:
+    missing = [name for name in REQUIRED_SECRETS if not os.environ.get(name)]
+    if missing:
+        raise RuntimeError(f"segredos obrigatórios não definidos: {', '.join(missing)}")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    require_secrets()
+    yield
+
+
+app = FastAPI(title="Invariant API", lifespan=lifespan)
 
 _default_origins = "http://localhost:5173,http://127.0.0.1:5173"
 allow_origins = [

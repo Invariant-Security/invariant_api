@@ -23,6 +23,17 @@ a misconfigured local .env.
 
 import os
 
+# Segredos obrigatórios do api (main.require_secrets / auth._secret_key).
+# Valores só de teste; setdefault não sobrescreve quem já definiu (ex.: o
+# teste de integração com os serviços reais define os tokens dele).
+for _name, _value in (
+    ("INVARIANT_API_SECRET_KEY", "segredo-de-sessao-dos-testes-" + "c" * 32),
+    ("INVARIANT_INTERNAL_ASSESSMENT_TOKEN", "token-assessment-dos-testes-" + "d" * 32),
+    ("INVARIANT_INTERNAL_DISCOVERY_TOKEN", "token-discovery-dos-testes-" + "e" * 32),
+    ("INVARIANT_INTERNAL_INGESTION_TOKEN", "token-ingestion-dos-testes-" + "f" * 32),
+):
+    os.environ.setdefault(_name, _value)
+
 
 def assert_test_database(conn) -> None:
     if os.environ.get("GITHUB_ACTIONS") == "true":

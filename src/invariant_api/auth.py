@@ -20,16 +20,19 @@ _SESSION_COOKIE_NAME = "invariant_session"
 _SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60  # 7 dias
 
 
+SECRET_KEY_ENV = "INVARIANT_API_SECRET_KEY"
+
+
 def _secret_key() -> bytes:
-    """INVARIANT_API_SECRET_KEY é gerado uma vez pelo postinst do .deb (ver
-    plano de empacotamento) -- em dev, cai num valor fixo só pra não
-    quebrar `docker compose up` sem .env preenchido; nunca use esse
-    fallback em produção (o instalador sempre define a variável real).
+    """Segredo que assina a sessão do console -- só isso (tokens internos e a
+    chave de cobrança são segredos separados). Gerado pelo instalador; sem
+    ele não há fallback: uma chave fixa no código permitiria forjar a sessão
+    de admin de qualquer instalação que esquecesse de definir a variável.
     """
     load_dotenv()
-    key = os.environ.get("INVARIANT_API_SECRET_KEY")
+    key = os.environ.get(SECRET_KEY_ENV, "")
     if not key:
-        key = "dev-only-insecure-secret-key-do-not-use-in-production"
+        raise RuntimeError(f"{SECRET_KEY_ENV} não definido")
     return key.encode("utf-8")
 
 
