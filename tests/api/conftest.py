@@ -19,6 +19,12 @@ so it's always disposable regardless of what its POSTGRES_DB happens to be
 named ("invariant", to mirror local dev) -- GITHUB_ACTIONS=true is the
 standard, GitHub-set env var for detecting this, not something guessable by
 a misconfigured local .env.
+
+2026-10-01: the exemption now also requires RUNNER_ENVIRONMENT=github-hosted.
+GITHUB_ACTIONS=true is set on the self-hosted runner too (vps-prod, the same
+host as the real dev and prod databases, where this suite would run as the
+Postgres superuser) -- moving ci.yml's `runs-on` there must not silently turn
+the backstop off.
 """
 
 import os
@@ -35,8 +41,15 @@ for _name, _value in (
     os.environ.setdefault(_name, _value)
 
 
+def _disposable_ci_database() -> bool:
+    """Só o Postgres de serviço de um job num runner hospedado pelo GitHub é
+    descartável por construção. Runner self-hosted não conta."""
+    return (os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted")
+
+
 def assert_test_database(conn) -> None:
-    if os.environ.get("GITHUB_ACTIONS") == "true":
+    if _disposable_ci_database():
         return
     with conn.cursor() as cur:
         cur.execute("SELECT current_database()")
