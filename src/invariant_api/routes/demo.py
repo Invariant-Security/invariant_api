@@ -36,46 +36,35 @@ def _read_runs() -> list[dict]:
     return runs
 
 
-# ponytail: 2MB is ~6x today's average run line (~313KB, 73 runs / 22MB
-# total) -- comfortable headroom without reading the whole file. If a
-# single run ever legitimately exceeds this, the fallback below still
-# returns the right answer, just slower; raise this constant first if that
-# starts happening often.
-_TAIL_READ_BYTES = 2 * 1024 * 1024
+# ponytail: name-prefix allowlist, fail-closed -- runs.jsonl also holds runs
+# against real hosts (the prod host "pivot", prod containers, unconfirmed
+# 10.42.0.x targets) and ops/assess_pivot.py rewrites it, so the file can't
+# be trusted; filter at read time. If the public demo ever needs targets
+# that don't follow the naming, the Docker label invariant.public-demo=true
+# (demo_sanitize.py) is the stronger source.
+PUBLIC_DEMO_TARGET_PREFIXES = ("invariant-demo-",)
 
 
-def _read_last_run() -> dict | None:
-    """Like _read_runs()[-1], but reads only the tail of the file instead
-    of parsing every line -- this is what made the demo page's first paint
-    depend on downloading+parsing the entire (currently 22MB) runs.jsonl
-    just to show the latest result.
-    """
-    if not RUNS_PATH.exists():
+def _public_demo_run(run: dict) -> dict | None:
+    """The run with only Demo Lab targets left in report.targets and
+    report.containers, or None if none are left."""
+    report = run.get("report") or {}
+    containers = {name: c for name, c in (report.get("containers") or {}).items()
+                  if name.startswith(PUBLIC_DEMO_TARGET_PREFIXES)}
+    targets = [name for name in report.get("targets") or [] if name in containers]
+    if not targets:
         return None
-    file_size = RUNS_PATH.stat().st_size
-    if file_size == 0:
-        return None
-    with open(RUNS_PATH, "rb") as f:
-        f.seek(max(0, file_size - _TAIL_READ_BYTES))
-        tail = f.read()
-    lines = [line for line in tail.split(b"\n") if line.strip()]
-    if lines:
-        try:
-            return json.loads(lines[-1])
-        except json.JSONDecodeError:
-            # The window landed mid-line (the real last line is bigger
-            # than _TAIL_READ_BYTES, e.g. a run with 80+ findings whose
-            # remediation text alone pushes it past 2MB -- confirmed on
-            # the "pivot" host target, 2026-08-30) -- what we grabbed is a
-            # truncated fragment, not a full line, even though it's
-            # non-blank. Falls through to the full read below.
-            pass
-    if file_size > _TAIL_READ_BYTES:
-        # Last line is bigger than our tail window -- fall back to a full
-        # read rather than guess.
-        runs = _read_runs()
-        return runs[-1] if runs else None
-    return None
+    report = {**report, "targets": targets, "containers": {name: containers[name] for name in targets}}
+    if "unexplained_total" in report:
+        # Aggregate over all targets -- recompute so dropped ones don't leak through it.
+        report["unexplained_total"] = sum(len(c.get("unexplained") or []) for c in report["containers"].values())
+    return {**run, "report": report}
+
+
+def _public_runs() -> list[dict]:
+    """Newest first, Demo Lab targets only."""
+    runs = (_public_demo_run(run) for run in reversed(_read_runs()))
+    return [run for run in runs if run is not None]
 
 
 @router.get("/api/demo/status")
@@ -90,15 +79,15 @@ def get_status():
 
 @router.get("/api/demo/runs")
 def get_runs():
-    return list(reversed(_read_runs()))
+    return _public_runs()
 
 
 @router.get("/api/demo/runs/latest")
 def get_latest_run():
-    run = _read_last_run()
-    if run is None:
+    runs = _public_runs()
+    if not runs:
         raise HTTPException(
             status_code=404,
             detail="No completed demo run yet -- run ./demo.sh first.",
         )
-    return run
+    return runs[0]
