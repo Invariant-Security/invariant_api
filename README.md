@@ -107,3 +107,9 @@ Tests run `DELETE FROM` on real tables. Point `DATABASE_URL` at
 The only exception is a GitHub-hosted runner
 (`RUNNER_ENVIRONMENT=github-hosted`). Runs that use the shared dev Postgres
 or the fixture containers are scheduled one at a time.
+
+## Locked dependencies
+
+`requirements.lock` (hashed) + `requirements-vcs.txt` (contracts, exact commit) are what the image and CI install; `pyproject.toml` keeps the loose ranges.
+Regenerate (add/bump a dep): in `python:3.12-slim@<digest>`, `pip install pip-tools && pip-compile --generate-hashes --strip-extras --allow-unsafe -o requirements.lock` with the deps from `pyproject.toml` (minus `invariant_contracts`) as input; bump contracts by editing the commit in `requirements-vcs.txt`.
+Bump the base: `docker buildx imagetools inspect python:3.12-slim` → put the index `Digest:` in the Dockerfile `ARG BASE`, then rebuild and run `pip check`.

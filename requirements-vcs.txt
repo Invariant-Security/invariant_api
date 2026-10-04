@@ -1,0 +1,2 @@
+# invariant_contracts v0.2.0 (commit exato; sem hash: pip não suporta hash de VCS)
+invariant_contracts @ git+https://github.com/Invariant-Security/invariant_contracts.git@45d24a27e27d00cbc7b24ea434ca329c70d9c884
