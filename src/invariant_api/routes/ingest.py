@@ -8,12 +8,15 @@ db.upsert_*/select_* sequence, unchanged.
 """
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from invariant_api.auth import require_admin_session
 from invariant_api.clients import ingestion_client
 from invariant_api.storage import postgres as db
 
-router = APIRouter()
+# Guardado por require_admin_session. A carga inicial do appliance
+# (bootstrap_documents.py) chama estas funções direto, sem passar pelo HTTP.
+router = APIRouter(dependencies=[Depends(require_admin_session)])
 
 
 @router.post("/ingest/fetch/{document}")
