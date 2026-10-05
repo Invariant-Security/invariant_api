@@ -20,7 +20,11 @@ Each stack has 6 services: `postgres`, `assessment`, `ingestion`,
 | `docker-compose.appliance.yml` | appliance | with `nginx.appliance.conf` and `provision.sh` (TLS certificate) |
 
 On the appliance, `bootstrap-documents.sh` runs once the stack is healthy
-and loads the common CIS benchmarks through the ingest routes.
+and loads the common CIS benchmarks by running
+`python -m invariant_api.bootstrap_documents` inside the `api` container (the
+ingest routes need an admin session, which a fresh appliance does not have).
+
+`/docs`, `/redoc` and `/openapi.json` are disabled in every environment.
 
 ## Authentication
 
@@ -53,7 +57,7 @@ Admin-only routes are marked (admin).
 - `POST /assess/{target}`, `GET /containers`, `GET /containers/{name}/check`
   (admin)
 - `POST /ingest/fetch/{document}`, `POST /ingest/extract/{document}`,
-  `POST /ingest/normalize/{document}` (**no admin check yet**)
+  `POST /ingest/normalize/{document}` (admin)
 - `POST /reports/pdf`, `GET /appliance/tls` (admin)
 - `POST /demo-snapshot/{preview,publish,revoke}` (admin),
   `GET /demo-snapshot`, `GET /demo-snapshot/report`. The same set exists

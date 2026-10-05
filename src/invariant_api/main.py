@@ -36,7 +36,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="Invariant API", lifespan=lifespan)
+app = FastAPI(title="Invariant API", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 _default_origins = "http://localhost:5173,http://127.0.0.1:5173"
 allow_origins = [

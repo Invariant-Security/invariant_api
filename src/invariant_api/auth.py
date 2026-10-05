@@ -92,9 +92,9 @@ def clear_session_cookie(response) -> None:
 def require_admin_session(request: Request) -> str:
     """Dependency que guarda toda rota que acessa o ambiente real
     (endpoints, assess, containers, reports) ou faz ação administrativa
-    (demo_snapshot's preview/publish/revoke). /ingest e /api/demo/*
-    continuam sem auth, de propósito -- não expõem nada do ambiente real
-    do usuário. Não precisa de Postgres pra validar -- só confere a
+    (demo_snapshot's preview/publish/revoke, /ingest). /api/demo/*
+    continua sem auth, de propósito -- só lê arquivo estático gravado
+    por demo.sh. Não precisa de Postgres pra validar -- só confere a
     assinatura HMAC do cookie.
     """
     cookie_value = request.cookies.get(_SESSION_COOKIE_NAME)
